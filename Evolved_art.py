@@ -1,7 +1,7 @@
 # 1. IMPORTS
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from PIL import Image, ImageTk, ImageFilter, ImageEnhance, ImageChops
+from PIL import Image, ImageTk, ImageFilter, ImageEnhance, ImageChops, ImageDraw
 import colorsys 
 import math
 import traceback
@@ -14,7 +14,7 @@ import random
 class ImageEvolverApp:
     def __init__(self, root_window):
         self.root = root_window
-        self.root.title("Image Evolver - Combobox Fix v2.13.6") 
+        self.root.title("Image Evolver - Seamless Kaleidoscope v2.13.10") 
         self.current_evolving_image = None
         self.photo_image = None
         self.input_image_loaded = None
@@ -28,11 +28,7 @@ class ImageEvolverApp:
 
         self.mouse_x_norm = tk.DoubleVar(value=0.5) 
         self.mouse_y_norm = tk.DoubleVar(value=0.5) 
-        self.mouse_control_enabled = tk.BooleanVar(value=False)
-        self.mouse_x_param_control = tk.StringVar(value="None")
-        self.mouse_y_param_control = tk.StringVar(value="None")
         
-        self.param_names_for_mouse = ["None"]
         self.after_id_preview = None 
         self.interactive_update_delay = 75 
 
@@ -40,7 +36,9 @@ class ImageEvolverApp:
         self.symmetry_options = [
             "None", "Horizontal (Left Master)", "Horizontal (Right Master)",
             "Vertical (Top Master)", "Vertical (Bottom Master)",
-            "4-Way Mirror (Top-Left Master)", "2-Fold Rotational (Average)"
+            "4-Way Mirror (Top-Left Master)", "2-Fold Rotational (Average)",
+            "Kaleidoscope (6-fold)", "Kaleidoscope (8-fold)", 
+            "Diagonal Mirror (TL-BR Master)", "Diagonal Mirror (TR-BL Master)" 
         ]
 
         self.zoom_factor = tk.DoubleVar(value=1.0)
@@ -64,12 +62,20 @@ class ImageEvolverApp:
         self.post_pan_anim_enabled_var = tk.BooleanVar(value=False)
         self.post_pan_drift_steps_var = tk.IntVar(value=10) 
         self.post_pan_drift_delay_var = tk.IntVar(value=40) 
-        self.post_pan_drift_amount_var = tk.DoubleVar(value=0.01)
+        self.post_pan_drift_amount_var = tk.DoubleVar(value=0.015) # Slightly increased default
         self.is_post_pan_anim_running = False
         self.post_pan_anim_dx_factor_dir = 0.0 
         self.post_pan_anim_dy_factor_dir = 0.0 
         self.post_pan_anim_current_step = 0
         self.post_pan_after_id = None
+
+        self.starter_shape_type_var = tk.StringVar(value="Circle")
+        self.starter_shape_options = ["Circle", "Square", "Horizontal Lines", "Vertical Lines", "Linear Gradient (H)", "Linear Gradient (V)", "Radial Gradient", "Noise (Grayscale)"]
+
+        self.zoom_pan_timing_var = tk.StringVar(value="Process ROI (Pre-Effects)")
+        self.zoom_pan_timing_options = ["Process ROI (Pre-Effects)", "View Full Image (Post-Effects)"]
+
+        self.stop_evolution_requested = False
 
         self.entries = {}
         self.op_vars = {} 
@@ -94,18 +100,25 @@ class ImageEvolverApp:
         
         csr = 0 
 
-        self.load_image_button = ttk.Button(self.controls_scrollable_frame, text="Load Input Image", command=self.load_input_image)
-        self.load_image_button.grid(row=csr, column=0, columnspan=4, sticky="we", padx=5, pady=5); csr += 1
-        self.loaded_image_label = ttk.Label(self.controls_scrollable_frame, textvariable=self.input_image_filename_var, wraplength=380)
-        self.loaded_image_label.grid(row=csr, column=0, columnspan=4, sticky=tk.W, padx=5, pady=2); csr += 1
+        input_frame = ttk.LabelFrame(self.controls_scrollable_frame, text="Image Input", padding="10")
+        input_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=5); csr += 1
+        self.load_image_button = ttk.Button(input_frame, text="Load Image File", command=self.load_input_image)
+        self.load_image_button.grid(row=0, column=0, columnspan=2, sticky="we", padx=5, pady=2)
+        self.loaded_image_label = ttk.Label(input_frame, textvariable=self.input_image_filename_var, wraplength=180)
+        self.loaded_image_label.grid(row=0, column=2, columnspan=2, sticky=tk.W, padx=5, pady=2)
+        ttk.Label(input_frame, text="Starter Shape:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
+        self.starter_shape_combo = ttk.Combobox(input_frame, textvariable=self.starter_shape_type_var, values=self.starter_shape_options, state="readonly", width=18)
+        self.starter_shape_combo.grid(row=1, column=1, sticky="we", padx=5, pady=2)
+        self.generate_starter_button = ttk.Button(input_frame, text="Generate Starter", command=self.generate_and_load_starter_shape)
+        self.generate_starter_button.grid(row=1, column=2, columnspan=2, sticky="we", padx=5, pady=2)
 
         ttk.Label(self.controls_scrollable_frame, text="Evolution Steps:").grid(row=csr, column=0, sticky=tk.W, padx=5, pady=3)
-        self.entries["steps"] = tk.StringVar(value="50") 
+        self.entries["steps"] = tk.StringVar(value="10") 
         ttk.Entry(self.controls_scrollable_frame, textvariable=self.entries["steps"], width=10).grid(row=csr, column=1, sticky="we", padx=5, pady=3)
-        ttk.Label(self.controls_scrollable_frame, text="ROI Proc. Width:").grid(row=csr, column=2, sticky=tk.W, padx=5, pady=3)
+        ttk.Label(self.controls_scrollable_frame, text="Proc. Width:").grid(row=csr, column=2, sticky=tk.W, padx=5, pady=3) 
         self.entries["output_width"] = tk.StringVar(value="512")
         ttk.Entry(self.controls_scrollable_frame, textvariable=self.entries["output_width"], width=10).grid(row=csr, column=3, sticky="we", padx=5, pady=3); csr += 1
-        ttk.Label(self.controls_scrollable_frame, text="ROI Proc. Height:").grid(row=csr, column=0, sticky=tk.W, padx=5, pady=3)
+        ttk.Label(self.controls_scrollable_frame, text="Proc. Height:").grid(row=csr, column=0, sticky=tk.W, padx=5, pady=3) 
         self.entries["output_height"] = tk.StringVar(value="512")
         ttk.Entry(self.controls_scrollable_frame, textvariable=self.entries["output_height"], width=10).grid(row=csr, column=1, sticky="we", padx=5, pady=3); csr += 1
 
@@ -118,10 +131,13 @@ class ImageEvolverApp:
             "edge_blend": {"var_key": "edge_blend_enabled", "label": "Edge Blend", "params": {"alpha": {"var_key": "edge_blend_alpha", "default": 0.1, "min": 0.0, "max": 1.0, "label": "Alpha:"}}},
             "pixelate": {"var_key": "pixelate_enabled", "label": "Pixelate", "params": {"block_size": {"var_key": "pixelate_block_size", "default": 8, "min": 2, "max": 64, "label": "Block:", "is_int": True}}},
             "channel_shift": {"var_key": "chanshift_enabled", "label": "Channel Shift", "params": {"r_x": {"var_key": "chanshift_rx", "default": 0, "min": -10, "max": 10, "label": "R X:", "is_int": True}, "r_y": {"var_key": "chanshift_ry", "default": 0, "min": -10, "max": 10, "label": "R Y:", "is_int": True},"b_x": {"var_key": "chanshift_bx", "default": 0, "min": -10, "max": 10, "label": "B X:", "is_int": True}, "b_y": {"var_key": "chanshift_by", "default": 0, "min": -10, "max": 10, "label": "B Y:", "is_int": True}}},
-            "shear": {"var_key": "shear_enabled", "label": "Shear", "params": {"x_factor": {"var_key": "shear_x_factor", "default": 0.0, "min": -0.3, "max": 0.3, "label": "X Fact:"}}},
+            "shear": {"var_key": "shear_enabled", "label": "Shear (Tiled)", "params": {"x_factor": {"var_key": "shear_x_factor", "default": 0.0, "min": -0.5, "max": 0.5, "label": "X Fact:"}}},
             "displacement_map": {"var_key": "displace_enabled", "label": "Displace Map", "params": {
                 "x_scale": {"var_key": "displace_x_scale", "default": 10.0, "min": -50.0, "max": 50.0, "label": "X Scale:"},
                 "y_scale": {"var_key": "displace_y_scale", "default": 10.0, "min": -50.0, "max": 50.0, "label": "Y Scale:"},
+            }},
+            "simple_tile": {"var_key": "tile_enabled", "label": "Simple Tile", "params": { 
+                 "tile_scale": {"var_key": "tile_scale_factor", "default": 0.5, "min": 0.1, "max": 2.0, "label": "Tile Scale:"}
             }},
             "hue_shift": {"var_key": "hue_enabled", "label": "Hue Shift", "params": {"amount": {"var_key": "hue_amount", "default": 0.0, "min": -0.05, "max": 0.05, "label": "Amt/Stp:", "anim_config": {"amp_default": 0.02, "period_default": 50, "amp_min":0, "amp_max":0.1, "period_min":10, "period_max":100}}}},
             "rotate": {"var_key": "rotate_enabled", "label": "Rotate (Tiled)", "params": {"angle": {"var_key": "rotate_angle_value", "default": 0.0, "min": -45.0, "max": 45.0, "label": "Ang/Stp(°):", "anim_config": {"amp_default": 15.0, "period_default": 60, "amp_min":0, "amp_max":45, "period_min":10, "period_max":200}}}},
@@ -131,48 +147,37 @@ class ImageEvolverApp:
         }
 
         for op_key_cfg, config in self.operations_config.items():
-            self.op_vars[config["var_key"]] = tk.BooleanVar(value=False);
+            default_op_state = op_key_cfg in [] 
+            self.op_vars[config["var_key"]] = tk.BooleanVar(value=default_op_state);
             op_row_frame = ttk.Frame(op_frame); op_row_frame.grid(row=op_cr, column=0, columnspan=4, sticky=tk.W, pady=1)
-            ttk.Checkbutton(op_row_frame, text=config["label"], variable=self.op_vars[config["var_key"]], command=self.schedule_interactive_update).pack(side=tk.LEFT, padx=(0,5))
-            
+            ttk.Checkbutton(op_row_frame, text=config["label"], variable=self.op_vars[config["var_key"]]).pack(side=tk.LEFT, padx=(0,5)) 
             param_controls_frame = ttk.Frame(op_row_frame); param_controls_frame.pack(side=tk.LEFT)
             param_gui_row = 0
-
             if op_key_cfg == "displacement_map": 
                 ttk.Button(param_controls_frame, text="Load DMap", command=self.load_displacement_map_image, width=10).grid(row=param_gui_row, column=0, padx=(5,2))
                 ttk.Label(param_controls_frame, textvariable=self.displacement_map_filename_var, width=15, wraplength=100).grid(row=param_gui_row, column=1, columnspan=2, sticky=tk.W, padx=2)
                 param_gui_row +=1
-                
                 self.op_params["displace_map_channel"] = tk.StringVar(value="Luminance")
                 displace_map_channels = ["Luminance", "Red", "Green", "Blue", "Alpha"]
                 ttk.Label(param_controls_frame, text="Map Chan:").grid(row=param_gui_row, column=0, sticky=tk.E, padx=(5,0))
-                # CORRECTED: Added bind to the Combobox
                 dmap_channel_combo = ttk.Combobox(param_controls_frame, textvariable=self.op_params["displace_map_channel"], values=displace_map_channels, state="readonly", width=10)
                 dmap_channel_combo.grid(row=param_gui_row, column=1, sticky=tk.W)
-                dmap_channel_combo.bind("<<ComboboxSelected>>", self.schedule_interactive_update)
+                dmap_channel_combo.bind("<<ComboboxSelected>>", self.schedule_interactive_update) 
                 param_gui_row +=1
-
-
             for param_key_cfg, p_config in config["params"].items():
                 param_var_key = p_config["var_key"]; var_type = tk.IntVar if p_config.get("is_int") else tk.DoubleVar
                 self.op_params[param_var_key] = var_type(value=p_config["default"])
-                param_display_name = config["label"] + " " + p_config["label"].replace(":", "")
-                if param_display_name not in self.param_names_for_mouse: self.param_names_for_mouse.append(param_display_name)
-                
                 current_col_param = 0
-                if op_key_cfg == "displacement_map" and param_gui_row > 1 : 
-                    current_col_param = 0 
-                
+                if op_key_cfg == "displacement_map" and param_gui_row > 1 : current_col_param = 0 
                 ttk.Label(param_controls_frame, text=p_config["label"]).grid(row=param_gui_row, column=current_col_param, sticky=tk.E, padx=(5,0)); current_col_param+=1
                 scale_length = 50 
-                ttk.Scale(param_controls_frame, variable=self.op_params[param_var_key], from_=p_config["min"], to=p_config["max"], orient=tk.HORIZONTAL, length=scale_length, command=self.schedule_interactive_update).grid(row=param_gui_row, column=current_col_param, sticky=tk.W, padx=(0,2)); current_col_param+=1
+                ttk.Scale(param_controls_frame, variable=self.op_params[param_var_key], from_=p_config["min"], to=p_config["max"], orient=tk.HORIZONTAL, length=scale_length).grid(row=param_gui_row, column=current_col_param, sticky=tk.W, padx=(0,2)); current_col_param+=1
                 ttk.Label(param_controls_frame, textvariable=self.op_params[param_var_key], width=5).grid(row=param_gui_row, column=current_col_param, sticky=tk.W, padx=(0,5)); current_col_param+=1
-                
                 if "anim_config" in p_config:
                     anim_var_key = f"{param_var_key}_anim_enabled"; self.anim_vars[anim_var_key] = tk.BooleanVar(value=False)
                     anim_amp_key = f"{param_var_key}_anim_amp"; self.anim_params[anim_amp_key] = tk.DoubleVar(value=p_config["anim_config"]["amp_default"])
                     anim_period_key = f"{param_var_key}_anim_period"; self.anim_params[anim_period_key] = tk.IntVar(value=p_config["anim_config"]["period_default"])
-                    ttk.Checkbutton(param_controls_frame, text="A", variable=self.anim_vars[anim_var_key], width=2, command=self.schedule_interactive_update).grid(row=param_gui_row, column=current_col_param, sticky=tk.W, padx=(10,0)); current_col_param+=1
+                    ttk.Checkbutton(param_controls_frame, text="A", variable=self.anim_vars[anim_var_key], width=2).grid(row=param_gui_row, column=current_col_param, sticky=tk.W, padx=(10,0)); current_col_param+=1
                     ttk.Entry(param_controls_frame, textvariable=self.anim_params[anim_amp_key], width=4).grid(row=param_gui_row, column=current_col_param, padx=(0,1)); current_col_param+=1
                     ttk.Entry(param_controls_frame, textvariable=self.anim_params[anim_period_key], width=4).grid(row=param_gui_row, column=current_col_param, padx=(0,1)); current_col_param+=1
                 param_gui_row +=1
@@ -180,10 +185,14 @@ class ImageEvolverApp:
         
         symmetry_frame = ttk.LabelFrame(self.controls_scrollable_frame, text="Symmetry (Applied Last)", padding="10"); symmetry_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr +=1
         ttk.Label(symmetry_frame, text="Type:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=2)
-        self.symmetry_combo = ttk.Combobox(symmetry_frame, textvariable=self.symmetry_type_var, values=self.symmetry_options, state="readonly", width=25); self.symmetry_combo.grid(row=0, column=1, columnspan=3, sticky="ew", padx=5, pady=2); self.symmetry_combo.bind("<<ComboboxSelected>>", self.schedule_interactive_update)
+        self.symmetry_combo = ttk.Combobox(symmetry_frame, textvariable=self.symmetry_type_var, values=self.symmetry_options, state="readonly", width=25); self.symmetry_combo.grid(row=0, column=1, columnspan=3, sticky="ew", padx=5, pady=2)
         
-        view_controls_frame = ttk.LabelFrame(self.controls_scrollable_frame, text="View Controls (Defines ROI for Processing)", padding="10"); view_controls_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr +=1
+        view_controls_frame = ttk.LabelFrame(self.controls_scrollable_frame, text="View & ROI Controls", padding="10"); view_controls_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr +=1
         vc_row = 0
+        ttk.Label(view_controls_frame, text="Zoom/Pan Mode:").grid(row=vc_row, column=0, sticky=tk.W, padx=5, pady=2)
+        self.zoom_pan_timing_combo = ttk.Combobox(view_controls_frame, textvariable=self.zoom_pan_timing_var, values=self.zoom_pan_timing_options, state="readonly", width=25)
+        self.zoom_pan_timing_combo.grid(row=vc_row, column=1, columnspan=3, sticky="ew", padx=5, pady=2)
+        vc_row+=1
         zoom_btn_subframe = ttk.Frame(view_controls_frame); zoom_btn_subframe.grid(row=vc_row, column=0, columnspan=4, pady=2); vc_row+=1
         ttk.Button(zoom_btn_subframe, text="Zoom In (+)", command=self.zoom_in_view).pack(side=tk.LEFT, padx=5); ttk.Button(zoom_btn_subframe, text="Zoom Out (-)", command=self.zoom_out_view).pack(side=tk.LEFT, padx=5); ttk.Button(zoom_btn_subframe, text="Reset View", command=self.reset_view).pack(side=tk.LEFT, padx=5)
         pan_btn_subframe_top = ttk.Frame(view_controls_frame); pan_btn_subframe_top.grid(row=vc_row, column=0, columnspan=4, pady=1); vc_row+=1; ttk.Button(pan_btn_subframe_top, text="Pan Up (↑)", command=lambda: self.pan_view(0, -1)).pack()
@@ -196,15 +205,23 @@ class ImageEvolverApp:
         
         post_pan_frame = ttk.LabelFrame(self.controls_scrollable_frame, text="Post-Pan Animation", padding="10"); post_pan_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr += 1; ttk.Checkbutton(post_pan_frame, text="Enable Drift", variable=self.post_pan_anim_enabled_var).grid(row=0, column=0, sticky=tk.W); ttk.Label(post_pan_frame, text="Steps:").grid(row=0, column=1, sticky=tk.E, padx=(10,0)); ttk.Entry(post_pan_frame, textvariable=self.post_pan_drift_steps_var, width=5).grid(row=0, column=2, sticky=tk.W); ttk.Label(post_pan_frame, text="Delay(ms):").grid(row=1, column=1, sticky=tk.E, padx=(10,0)); ttk.Entry(post_pan_frame, textvariable=self.post_pan_drift_delay_var, width=5).grid(row=1, column=2, sticky=tk.W); ttk.Label(post_pan_frame, text="Amount:").grid(row=0, column=3, sticky=tk.E, padx=(10,0)); ttk.Scale(post_pan_frame, variable=self.post_pan_drift_amount_var, from_=0.001, to=0.05, orient=tk.HORIZONTAL, length=80).grid(row=0, column=4, sticky=tk.W); ttk.Label(post_pan_frame, textvariable=self.post_pan_drift_amount_var, width=6).grid(row=0, column=5, sticky=tk.W)
         
-        feedback_frame = ttk.LabelFrame(self.controls_scrollable_frame, text="Feedback Options", padding="10"); feedback_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr +=1; self.op_vars["blend_original_enabled"] = tk.BooleanVar(value=False); self.op_params["blend_alpha_value"] = tk.DoubleVar(value=0.01); blend_alpha_display_name = "Blend Original Alpha"; self.param_names_for_mouse.append(blend_alpha_display_name); ttk.Checkbutton(feedback_frame, text="Blend with Original", variable=self.op_vars["blend_original_enabled"], command=self.schedule_interactive_update).grid(row=0, column=0, sticky=tk.W); ttk.Label(feedback_frame, text="Alpha:").grid(row=0, column=1, sticky=tk.E, padx=2); ttk.Scale(feedback_frame, variable=self.op_params["blend_alpha_value"], from_=0.0, to=0.2, orient=tk.HORIZONTAL, length=100, command=self.schedule_interactive_update).grid(row=0, column=2, sticky=tk.W); ttk.Label(feedback_frame,textvariable=self.op_params["blend_alpha_value"], width=4).grid(row=0, column=3, sticky=tk.W)
-        
-        mouse_frame = ttk.LabelFrame(self.controls_scrollable_frame, text="Mouse Interaction", padding="10"); mouse_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr += 1; ttk.Checkbutton(mouse_frame, text="Enable Mouse Control", variable=self.mouse_control_enabled, command=self.schedule_interactive_update).grid(row=0, column=0, columnspan=2, sticky=tk.W); ttk.Label(mouse_frame, text="Mouse X controls:").grid(row=1, column=0, sticky=tk.W); self.mouse_x_combo = ttk.Combobox(mouse_frame, textvariable=self.mouse_x_param_control, values=self.param_names_for_mouse, state="readonly", width=22, postcommand=self.update_mouse_param_options); self.mouse_x_combo.grid(row=1, column=1, sticky="ew"); self.mouse_x_combo.bind("<<ComboboxSelected>>", self.schedule_interactive_update); ttk.Label(mouse_frame, text="Mouse Y controls:").grid(row=2, column=0, sticky=tk.W); self.mouse_y_combo = ttk.Combobox(mouse_frame, textvariable=self.mouse_y_param_control, values=self.param_names_for_mouse, state="readonly", width=22, postcommand=self.update_mouse_param_options); self.mouse_y_combo.grid(row=2, column=1, sticky="ew"); self.mouse_y_combo.bind("<<ComboboxSelected>>", self.schedule_interactive_update)
+        feedback_frame = ttk.LabelFrame(self.controls_scrollable_frame, text="Feedback Options", padding="10"); feedback_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr +=1; self.op_vars["blend_original_enabled"] = tk.BooleanVar(value=False); self.op_params["blend_alpha_value"] = tk.DoubleVar(value=0.01); 
+        ttk.Checkbutton(feedback_frame, text="Blend with Original", variable=self.op_vars["blend_original_enabled"]).grid(row=0, column=0, sticky=tk.W); ttk.Label(feedback_frame, text="Alpha:").grid(row=0, column=1, sticky=tk.E, padx=2); ttk.Scale(feedback_frame, variable=self.op_params["blend_alpha_value"], from_=0.0, to=0.2, orient=tk.HORIZONTAL, length=100).grid(row=0, column=2, sticky=tk.W); ttk.Label(feedback_frame,textvariable=self.op_params["blend_alpha_value"], width=4).grid(row=0, column=3, sticky=tk.W)
         
         output_options_frame = ttk.LabelFrame(self.controls_scrollable_frame, text="Output Options", padding="10"); output_options_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr += 1; ttk.Label(output_options_frame, text="Default Filename:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=3); self.entries["default_filename"] = tk.StringVar(value="evolved_art.png"); ttk.Entry(output_options_frame, textvariable=self.entries["default_filename"], width=30).grid(row=0, column=1, columnspan=3, sticky="we", padx=5, pady=3); ttk.Checkbutton(output_options_frame, text="Save All Frames (Multi-Step)", variable=self.save_animation_frames_var).grid(row=1, column=0, columnspan=4, sticky=tk.W, padx=5, pady=3)
         
-        buttons_frame = ttk.Frame(self.controls_scrollable_frame); buttons_frame.grid(row=csr, column=0, columnspan=4, pady=15, sticky="ew"); csr +=1; buttons_frame.columnconfigure(0, weight=1); buttons_frame.columnconfigure(1, weight=1); buttons_frame.columnconfigure(2, weight=1); buttons_frame.columnconfigure(3, weight=1); self.evolve_button = ttk.Button(buttons_frame, text="Multi-Step Evolve", command=self.trigger_multistep_evolution); self.evolve_button.grid(row=0, column=0, padx=2, pady=2, sticky="ew"); self.hold_evolve_button = ttk.Button(buttons_frame, text="Hold to Evolve"); self.hold_evolve_button.grid(row=0, column=1, padx=2, pady=2, sticky="ew"); self.hold_evolve_button.bind("<ButtonPress-1>", self.on_hold_evolve_press); self.hold_evolve_button.bind("<ButtonRelease-1>", self.on_hold_evolve_release); self.reset_button = ttk.Button(buttons_frame, text="Reset Image", command=self.reset_image_to_original); self.reset_button.grid(row=0, column=2, padx=2, pady=2, sticky="ew"); self.save_button = ttk.Button(buttons_frame, text="Save Image", command=self.save_image_as); self.save_button.grid(row=0, column=3, padx=2, pady=2, sticky="ew")
+        buttons_frame = ttk.Frame(self.controls_scrollable_frame); buttons_frame.grid(row=csr, column=0, columnspan=4, pady=15, sticky="ew"); csr +=1
+        buttons_frame.columnconfigure(0, weight=1); buttons_frame.columnconfigure(1, weight=1); buttons_frame.columnconfigure(2, weight=1); buttons_frame.columnconfigure(3, weight=1); buttons_frame.columnconfigure(4, weight=1) 
+        self.preview_button = ttk.Button(buttons_frame, text="Preview Step", command=self.schedule_interactive_update) 
+        self.preview_button.grid(row=0, column=0, padx=2, pady=2, sticky="ew")
+        self.evolve_button = ttk.Button(buttons_frame, text="Multi-Step Evolve", command=self.trigger_multistep_evolution); self.evolve_button.grid(row=0, column=1, padx=2, pady=2, sticky="ew") 
+        self.stop_button = ttk.Button(buttons_frame, text="Stop Evolve", command=self.request_stop_evolution, state=tk.DISABLED) 
+        self.stop_button.grid(row=0, column=2, padx=2, pady=2, sticky="ew") 
+        self.hold_evolve_button = ttk.Button(buttons_frame, text="Hold to Evolve"); self.hold_evolve_button.grid(row=1, column=0, columnspan=2, padx=2, pady=2, sticky="ew"); self.hold_evolve_button.bind("<ButtonPress-1>", self.on_hold_evolve_press); self.hold_evolve_button.bind("<ButtonRelease-1>", self.on_hold_evolve_release) 
+        self.reset_button = ttk.Button(buttons_frame, text="Reset Image", command=self.reset_image_to_original); self.reset_button.grid(row=1, column=2, padx=2, pady=2, sticky="ew") 
+        self.save_button = ttk.Button(buttons_frame, text="Save Image", command=self.save_image_as); self.save_button.grid(row=1, column=3, padx=2, pady=2, sticky="ew") 
         
-        self.status_label = ttk.Label(self.controls_scrollable_frame, text="Load an image. Adjust parameters for live preview.", wraplength=380); self.status_label.grid(row=csr, column=0, columnspan=4, pady=5, sticky=tk.W); csr+=1
+        self.status_label = ttk.Label(self.controls_scrollable_frame, text="Load an image. Adjust parameters and click 'Preview Step'.", wraplength=380); self.status_label.grid(row=csr, column=0, columnspan=4, pady=5, sticky=tk.W); csr+=1
         
         self.image_display_label = ttk.Label(main_frame, relief="sunken", anchor="center", background="#2B2B2B")
         self.image_display_label.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
@@ -218,48 +235,51 @@ class ImageEvolverApp:
 
         self.root.after(200, self._capture_initial_display_size)
 
+    # --- METHOD DEFINITIONS ---
     def _capture_initial_display_size(self):
         self.root.update_idletasks();label_w=self.image_display_label.winfo_width();label_h=self.image_display_label.winfo_height()
         if label_w > 50 and label_h > 50: self.target_display_width=label_w-10;self.target_display_height=label_h-10
 
-    def update_mouse_param_options(self):
-        self.mouse_x_combo['values']=self.param_names_for_mouse
-        self.mouse_y_combo['values']=self.param_names_for_mouse
+    def update_mouse_param_options(self): pass # No longer needed for parameter control
 
-    def schedule_interactive_update(self, event=None): # DEFINED
-        if self.is_post_pan_anim_running: return 
+    def schedule_interactive_update(self, event=None): 
+        if self.is_post_pan_anim_running: print("DEBUG: Interactive update skipped due to post-pan anim running"); return 
         if not self.input_image_loaded: return
         if self.after_id_preview: self.root.after_cancel(self.after_id_preview)
         self.after_id_preview = self.root.after(self.interactive_update_delay, self._perform_interactive_update) 
 
-    def _perform_interactive_update(self): # DEFINED
+    def _perform_interactive_update(self): 
+        # print("DEBUG: _perform_interactive_update called")
         if not self.input_image_loaded: return
-        base_for_roi = self.current_evolving_image if self.current_evolving_image else self.input_image_loaded
-        if not base_for_roi : return 
+        source_for_pipeline = self.current_evolving_image if self.current_evolving_image else self.input_image_loaded
+        if not source_for_pipeline : return 
         try:
             output_w = int(self.entries["output_width"].get()); output_h = int(self.entries["output_height"].get())
             if output_w <=0 or output_h <=0: return
-            image_to_process = self._get_image_roi_at_output_resolution(base_for_roi, output_w, output_h, step_num_for_multistep=0)
+            image_to_process = None
+            zoom_pan_mode = self.zoom_pan_timing_var.get()
+            if zoom_pan_mode == "Process ROI (Pre-Effects)":
+                image_to_process = self._get_image_roi_at_output_resolution(source_for_pipeline, output_w, output_h, step_num_for_multistep=0)
+            else: 
+                if source_for_pipeline.size != (output_w, output_h): image_to_process = source_for_pipeline.copy().resize((output_w, output_h), Image.Resampling.LANCZOS)
+                else: image_to_process = source_for_pipeline.copy()
             if not image_to_process: return
             evolved_one_step = self._apply_evolution_pipeline_once(image_to_process, step_num_for_multistep=0) 
             self.current_evolving_image = evolved_one_step 
-            self.display_image(self.current_evolving_image)
+            self.display_image(self.current_evolving_image) 
             self.status_label.config(text="Preview updated.")
         except Exception as e: self.status_label.config(text=f"Preview Error: {e}"); traceback.print_exc()
 
     def _get_image_roi_at_output_resolution(self, source_image, target_w, target_h, step_num_for_multistep=0):
         if not source_image: return None
         src_w, src_h = source_image.size
-        current_center_x_norm = self.view_center_x_norm.get()
-        current_center_y_norm = self.view_center_y_norm.get()
+        current_center_x_norm = self.view_center_x_norm.get(); current_center_y_norm = self.view_center_y_norm.get()
         if step_num_for_multistep > 0: 
             if self.anim_vars.get("pan_x_anim_enabled", tk.BooleanVar(value=False)).get():
-                amp = self.anim_params.get("pan_x_anim_amp", tk.DoubleVar(value=0.1)).get()
-                period = self.anim_params.get("pan_x_anim_period", tk.IntVar(value=50)).get()
+                amp = self.anim_params.get("pan_x_anim_amp", tk.DoubleVar(value=0.1)).get(); period = self.anim_params.get("pan_x_anim_period", tk.IntVar(value=50)).get()
                 if period > 0: current_center_x_norm = max(0.0, min(1.0, self.view_center_x_norm.get() + amp * math.sin(2 * math.pi * step_num_for_multistep / period)))
             if self.anim_vars.get("pan_y_anim_enabled", tk.BooleanVar(value=False)).get():
-                amp = self.anim_params.get("pan_y_anim_amp", tk.DoubleVar(value=0.1)).get()
-                period = self.anim_params.get("pan_y_anim_period", tk.IntVar(value=60)).get()
+                amp = self.anim_params.get("pan_y_anim_amp", tk.DoubleVar(value=0.1)).get(); period = self.anim_params.get("pan_y_anim_period", tk.IntVar(value=60)).get()
                 if period > 0: current_center_y_norm = max(0.0, min(1.0, self.view_center_y_norm.get() + amp * math.sin(2 * math.pi * step_num_for_multistep / period)))
         zoom = max(0.01, min(self.zoom_factor.get(), 100.0))
         center_x_abs = current_center_x_norm * src_w; center_y_abs = current_center_y_norm * src_h
@@ -270,10 +290,17 @@ class ImageEvolverApp:
             return source_image.copy().resize((target_w,target_h), Image.Resampling.LANCZOS)
         return source_image.crop(crop_box).resize((target_w,target_h), Image.Resampling.LANCZOS)
 
-    def _apply_symmetry(self, image_in):
+    def _apply_symmetry(self, image_in): # Updated with more robust 4-way and Kaleidoscope
         symmetry_type = self.symmetry_type_var.get();
         if symmetry_type == "None" or image_in is None: return image_in
-        img_to_sym = image_in.copy(); w, h = img_to_sym.size; hw, hh = w // 2, h // 2
+        
+        img_to_sym = image_in.copy()
+        w, h = img_to_sym.size
+        hw, hh = w // 2, h // 2
+        cx, cy = w / 2.0, h / 2.0 # Use float for center for more precision in kaleidoscope
+        
+        # print(f"DEBUG: _apply_symmetry: Type='{symmetry_type}', Size={w}x{h}, hw={hw}, hh={hh}")
+
         try:
             if symmetry_type == "Horizontal (Left Master)":
                 if hw <= 0: return img_to_sym 
@@ -289,49 +316,99 @@ class ImageEvolverApp:
                 bottom = img_to_sym.crop((0, hh, w, h)); top_f = bottom.transpose(Image.FLIP_TOP_BOTTOM); img_to_sym.paste(top_f, (0, 0))
             elif symmetry_type == "4-Way Mirror (Top-Left Master)":
                 if hw <= 0 or hh <= 0: return img_to_sym 
-                new_img = Image.new('RGB', (w,h), color=(0,0,0)) 
-                tl = img_to_sym.crop((0,0,hw,hh))
-                tr = tl.transpose(Image.FLIP_LEFT_RIGHT)
-                bl = tl.transpose(Image.FLIP_TOP_BOTTOM)
-                br = tr.transpose(Image.FLIP_TOP_BOTTOM)
-                new_img.paste(tl,(0,0)); new_img.paste(tr,(hw,0)); 
-                new_img.paste(bl,(0,hh)); new_img.paste(br,(hw,hh))
-                img_to_sym = new_img
+                new_img = Image.new(img_to_sym.mode, (w,h)) 
+                try:
+                    tl = img_to_sym.crop((0,0,hw,hh))
+                    tr = tl.transpose(Image.FLIP_LEFT_RIGHT)
+                    bl = tl.transpose(Image.FLIP_TOP_BOTTOM)
+                    br = tr.transpose(Image.FLIP_TOP_BOTTOM)
+                    new_img.paste(tl,(0,0)); new_img.paste(tr,(hw,0)); 
+                    new_img.paste(bl,(0,hh)); new_img.paste(br,(hw,hh))
+                    img_to_sym = new_img
+                except Exception as e_4way_detail:
+                    print(f"ERROR in 4-Way Mirror detail: {e_4way_detail}"); traceback.print_exc(); return image_in
             elif symmetry_type == "2-Fold Rotational (Average)": img_to_sym = Image.blend(img_to_sym, img_to_sym.rotate(180), alpha=0.5)
+            elif symmetry_type.startswith("Kaleidoscope"):
+                folds = 6 if "6-fold" in symmetry_type else 8
+                angle_slice_rad = math.pi / folds # Angle of the primary reflective wedge
+                
+                output_img = Image.new(image_in.mode, (w, h))
+                target_pixels = output_img.load()
+                source_pixels = image_in.load()
+
+                for yt_target in range(h):
+                    for xt_target in range(w):
+                        # Translate to center
+                        vx = xt_target - cx
+                        vy = yt_target - cy
+                        
+                        angle = math.atan2(vy, vx)
+                        radius = math.sqrt(vx*vx + vy*vy)
+                        
+                        # Modulo angle into the first segment (0 to 2*angle_slice)
+                        angle = angle % (2 * angle_slice_rad)
+                        # Reflect if in the second half of this segment
+                        if angle > angle_slice_rad:
+                            angle = (2 * angle_slice_rad) - angle
+                        
+                        # Convert back to source coordinates
+                        xs = cx + radius * math.cos(angle)
+                        ys = cy + radius * math.sin(angle)
+                        
+                        # Clamp and get pixel (simple nearest neighbor for source)
+                        xs_int = max(0, min(w - 1, int(round(xs))))
+                        ys_int = max(0, min(h - 1, int(round(ys))))
+                        
+                        target_pixels[xt_target, yt_target] = source_pixels[xs_int, ys_int]
+                img_to_sym = output_img
+
+            elif symmetry_type == "Diagonal Mirror (TL-BR Master)":
+                img_to_sym = img_to_sym.transpose(Image.TRANSPOSE)
+            elif symmetry_type == "Diagonal Mirror (TR-BL Master)":
+                img_to_sym = img_to_sym.transpose(Image.TRANSVERSE)
+            
+            # print(f"DEBUG: Symmetry '{symmetry_type}' applied successfully.")
         except Exception as e: print(f"Symmetry Error ('{symmetry_type}'): {e}"); traceback.print_exc(); return image_in 
         return img_to_sym
 
     def _apply_evolution_pipeline_once(self, image_in, step_num_for_multistep=0):
         current_img = image_in.copy(); output_w, output_h = current_img.size; active_params = {}
         for op_key_cfg, op_config in self.operations_config.items():
-            for param_key_cfg, p_config in op_config["params"].items():
-                var_key = p_config["var_key"]; base_val = self.op_params[var_key].get(); final_val = base_val
-                anim_enabled_key = f"{var_key}_anim_enabled"
-                if step_num_for_multistep > 0 and anim_enabled_key in self.anim_vars and self.anim_vars[anim_enabled_key].get():
-                    amp_key = f"{var_key}_anim_amp"; period_key = f"{var_key}_anim_period"
-                    amplitude = self.anim_params[amp_key].get(); period = self.anim_params[period_key].get()
-                    if period > 0: final_val = base_val + amplitude * math.sin(2 * math.pi * step_num_for_multistep / period); final_val = max(p_config["min"], min(p_config["max"], final_val))
-                if self.mouse_control_enabled.get():
-                    disp_name = op_config["label"]+" "+p_config["label"].replace(":",""); m_x,m_y=self.mouse_x_norm.get(),self.mouse_y_norm.get(); p_min,p_max=p_config["min"],p_config["max"]
-                    if self.mouse_x_param_control.get()==disp_name: final_val = p_min+(p_max-p_min)*m_x
-                    elif self.mouse_y_param_control.get()==disp_name: final_val = p_min+(p_max-p_min)*m_y
-                active_params[var_key] = int(final_val) if p_config.get("is_int") else final_val
+            if "params" in op_config: # Ensure params exist for this op
+                for param_key_cfg, p_config in op_config["params"].items():
+                    var_key = p_config["var_key"]; base_val = self.op_params[var_key].get(); final_val = base_val
+                    anim_enabled_key = f"{var_key}_anim_enabled"
+                    if step_num_for_multistep > 0 and anim_enabled_key in self.anim_vars and self.anim_vars[anim_enabled_key].get():
+                        amp_key = f"{var_key}_anim_amp"; period_key = f"{var_key}_anim_period"
+                        amplitude = self.anim_params[amp_key].get(); period = self.anim_params[period_key].get()
+                        if period > 0: final_val = base_val + amplitude * math.sin(2 * math.pi * step_num_for_multistep / period); final_val = max(p_config["min"], min(p_config["max"], final_val))
+                    active_params[var_key] = int(final_val) if p_config.get("is_int") else final_val
         
         blend_alpha_val = self.op_params["blend_alpha_value"].get()
-        if self.mouse_control_enabled.get():
-            b_min,b_max=0.0,0.2
-            if self.mouse_x_param_control.get()=="Blend Original Alpha": blend_alpha_val=b_min+(b_max-b_min)*self.mouse_x_norm.get()
-            elif self.mouse_y_param_control.get()=="Blend Original Alpha": blend_alpha_val=b_min+(b_max-b_min)*self.mouse_y_norm.get()
 
         if self.op_vars["blur_enabled"].get(): current_img = current_img.filter(ImageFilter.GaussianBlur(radius=active_params["blur_radius"]))
         if self.op_vars.get("unsharp_enabled").get(): current_img = current_img.filter(ImageFilter.UnsharpMask(radius=active_params["unsharp_radius"], percent=active_params["unsharp_percent"], threshold=active_params["unsharp_threshold"]))
         if self.op_vars.get("edge_blend_enabled").get(): edges = current_img.filter(ImageFilter.FIND_EDGES).convert("RGB"); current_img = Image.blend(current_img, edges, alpha=active_params["edge_blend_alpha"])
         if self.op_vars.get("pixelate_enabled").get():
-            bs=max(2,active_params["pixelate_block_size"]); w,h=current_img.size
-            if w//bs>0 and h//bs>0: tmp=current_img.resize((w//bs,h//bs),Image.Resampling.NEAREST); current_img=tmp.resize((w,h),Image.Resampling.NEAREST)
+            bs=max(2,active_params["pixelate_block_size"]); w_px,h_px=current_img.size 
+            if w_px//bs>0 and h_px//bs>0: tmp=current_img.resize((w_px//bs,h_px//bs),Image.Resampling.NEAREST); current_img=tmp.resize((w_px,h_px),Image.Resampling.NEAREST)
         if self.op_vars.get("chanshift_enabled").get():
             r,g,b=current_img.split(); r_s=ImageChops.offset(r,active_params["chanshift_rx"],active_params["chanshift_ry"]); b_s=ImageChops.offset(b,active_params["chanshift_bx"],active_params["chanshift_by"]); current_img=Image.merge("RGB",(r_s,g,b_s))
-        if self.op_vars.get("shear_enabled").get(): sx=active_params.get("shear_x_factor",0.0); matrix=(1,sx,0,0,1,0); current_img=current_img.transform(current_img.size,Image.AFFINE,matrix,Image.Resampling.BICUBIC,fillcolor=(50,50,50))
+        
+        if self.op_vars.get("shear_enabled").get():
+            sx = active_params.get("shear_x_factor", 0.0)
+            w_shear, h_shear = current_img.size
+            new_sheared_image = Image.new('RGB', (w_shear, h_shear), (0,0,0)) 
+            source_pixels = current_img.load()
+            target_pixels = new_sheared_image.load()
+            for yt_target in range(h_shear):
+                for xt_target in range(w_shear):
+                    xs_source_float = xt_target - sx * yt_target 
+                    ys_source_float = yt_target     
+                    xs_source_wrapped = int(round(xs_source_float)) % w_shear
+                    ys_source_wrapped = int(round(ys_source_float)) % h_shear
+                    target_pixels[xt_target, yt_target] = source_pixels[xs_source_wrapped, ys_source_wrapped]
+            current_img = new_sheared_image
         
         if self.op_vars.get("displace_enabled", tk.BooleanVar(value=False)).get() and self.displacement_map_image:
             dmap = self.displacement_map_image.resize(current_img.size, Image.Resampling.LANCZOS)
@@ -354,6 +431,19 @@ class ImageEvolverApp:
                     src_y = max(0, min(output_h - 1, int(round(y_out + dy))))
                     displaced_pixels[x_out, y_out] = source_pixels[src_x, src_y]
             current_img = displaced_img
+        
+        if self.op_vars.get("tile_enabled", tk.BooleanVar(value=False)).get():
+            tile_scale = active_params.get("tile_scale_factor", 0.5)
+            if tile_scale > 0:
+                w_tile_src, h_tile_src = current_img.size 
+                tile_w = int(w_tile_src * tile_scale); tile_h = int(h_tile_src * tile_scale)
+                if tile_w > 0 and tile_h > 0:
+                    small_tile = current_img.resize((tile_w, tile_h), Image.Resampling.LANCZOS)
+                    tiled_output = Image.new('RGB', (w_tile_src, h_tile_src)) 
+                    for y_pos in range(0, h_tile_src, tile_h):
+                        for x_pos in range(0, w_tile_src, tile_w):
+                            tiled_output.paste(small_tile, (x_pos, y_pos))
+                    current_img = tiled_output
 
         if self.op_vars["hue_enabled"].get():
             try: hsv=current_img.convert('HSV');h_ch,s_ch,v_ch=hsv.split();h_data=[(p+int(active_params["hue_amount"]*255))%256 for p in h_ch.getdata()];h_ch.putdata(h_data);current_img=Image.merge('HSV',(h_ch,s_ch,v_ch)).convert('RGB')
@@ -370,21 +460,15 @@ class ImageEvolverApp:
         if self.op_vars["blend_original_enabled"].get() and self.input_image_loaded:
             original_roi = self._get_image_roi_at_output_resolution(self.input_image_loaded, output_w, output_h, step_num_for_multistep)
             if original_roi: current_img=Image.blend(current_img,original_roi,alpha=blend_alpha_val)
-        current_img = self._apply_symmetry(current_img) # Apply symmetry last
+        current_img = self._apply_symmetry(current_img) 
         return current_img
 
     def on_mouse_move_over_image(self, event):
         if self.panning_active: self.on_pan_drag(event); return
-        if not (self.image_display_label.winfo_width() > 1 and self.image_display_label.winfo_height() > 1): return
-        x = max(0.0, min(1.0, event.x / self.image_display_label.winfo_width())); y = max(0.0, min(1.0, event.y / self.image_display_label.winfo_height()))
-        self.mouse_x_norm.set(x); self.mouse_y_norm.set(y)
-        if self.mouse_control_enabled.get() and (self.mouse_x_param_control.get() != "None" or self.mouse_y_param_control.get() != "None"):
-            self.schedule_interactive_update()
     def on_mouse_leave_image(self, event): pass  
     def on_pan_start(self, event):
         self._cancel_post_pan_animation() 
         if not self.input_image_loaded: return
-        if self.mouse_control_enabled.get() and (self.mouse_x_param_control.get() != "None" or self.mouse_y_param_control.get() != "None"): return
         self.panning_active = True; self.pan_start_mouse_x = event.x; self.pan_start_mouse_y = event.y
         self.pan_start_view_cx = self.view_center_x_norm.get(); self.pan_start_view_cy = self.view_center_y_norm.get()
         self.image_display_label.config(cursor="fleur")
@@ -407,7 +491,7 @@ class ImageEvolverApp:
             else:
                 self.schedule_interactive_update() 
 
-    def load_input_image(self): # DEFINED
+    def load_input_image(self): 
         self._cancel_post_pan_animation()
         fpath = filedialog.askopenfilename(title="Select Input Image", filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.gif"), ("All", "*.*")], parent=self.root)
         if fpath:
@@ -419,23 +503,46 @@ class ImageEvolverApp:
                 self.current_evolving_image = None; self.reset_view() 
             except Exception as e: messagebox.showerror("Load Error", f"Failed: {e}", parent=self.root); self.status_label.config(text="Load error."); traceback.print_exc()
 
-    def load_displacement_map_image(self): # DEFINED
-        fpath = filedialog.askopenfilename(
-            title="Select Displacement Map Image",
-            filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tiff"), ("All files", "*.*")],
-            parent=self.root
-        )
+    def load_displacement_map_image(self): 
+        fpath = filedialog.askopenfilename(title="Select Displacement Map Image", filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tiff"), ("All files", "*.*")],parent=self.root)
         if fpath:
             try:
                 img = Image.open(fpath)
-                self.displacement_map_image = img # Keep original mode for flexibility in displacement logic
+                self.displacement_map_image = img 
                 self.displacement_map_filename_var.set(fpath.split('/')[-1])
                 self.status_label.config(text=f"DMap: {self.displacement_map_filename_var.get()}")
-                self.schedule_interactive_update() 
             except Exception as e:
                 messagebox.showerror("Map Load Error", f"Failed to load DMap: {e}", parent=self.root)
                 self.displacement_map_image = None; self.displacement_map_filename_var.set("No map loaded.")
                 traceback.print_exc()
+    
+    def generate_and_load_starter_shape(self): 
+        self._cancel_post_pan_animation()
+        shape_type = self.starter_shape_type_var.get()
+        try:
+            w = int(self.entries["output_width"].get()); h = int(self.entries["output_height"].get())
+            if w <= 0 or h <= 0: messagebox.showerror("Error", "Output W/H must be positive.", parent=self.root); return
+            img = Image.new('RGB', (w, h), color='black'); draw = ImageDraw.Draw(img)
+            if shape_type == "Circle": radius = min(w,h)//3; x0,y0=w//2-radius,h//2-radius; x1,y1=w//2+radius,h//2+radius; draw.ellipse([(x0,y0),(x1,y1)],fill='white',outline='gray')
+            elif shape_type == "Square": side=min(w,h)//2; x0,y0=w//2-side//2,h//2-side//2; x1,y1=w//2+side//2,h//2+side//2; draw.rectangle([(x0,y0),(x1,y1)],fill='white',outline='gray')
+            elif shape_type == "Horizontal Lines":
+                for i in range(0,h,max(1,h//20)): draw.line([(0,i),(w,i)],fill='white',width=1)
+            elif shape_type == "Vertical Lines":
+                for i in range(0,w,max(1,w//20)): draw.line([(i,0),(i,h)],fill='white',width=1)
+            elif shape_type == "Linear Gradient (H)":
+                for xg in range(w): val=int((xg/w)*255); draw.line([(xg,0),(xg,h)],fill=(val,val,val))
+            elif shape_type == "Linear Gradient (V)":
+                for yg in range(h): val=int((yg/h)*255); draw.line([(0,yg),(w,yg)],fill=(val,val,val))
+            elif shape_type == "Radial Gradient":
+                mr=math.sqrt((w/2)**2+(h/2)**2) if w>0 and h>0 else 1
+                for yg in range(h):
+                    for xg in range(w): dist=math.sqrt((xg-w/2)**2+(yg-h/2)**2); val=int(255*(1-min(1,dist/mr if mr>0 else 1))); draw.point((xg,yg),fill=(val,val,val))
+            elif shape_type == "Noise (Grayscale)":
+                px=img.load(); 
+                for yp in range(h):
+                    for xp in range(w): v=random.randint(0,255); px[xp,yp]=(v,v,v)
+            self.input_image_loaded=img; self.input_image_filename_var.set(f"Generated {shape_type}"); self.current_evolving_image=None; self.reset_view(); self.status_label.config(text=f"Generated {shape_type} loaded.")
+        except Exception as e: messagebox.showerror("Starter Shape Error",f"{e}",parent=self.root); traceback.print_exc()
 
     def zoom_in_view(self): self._cancel_post_pan_animation(); self.zoom_factor.set(min(self.zoom_factor.get() * self.zoom_increment, 20.0)); self.schedule_interactive_update()
     def zoom_out_view(self): self._cancel_post_pan_animation(); self.zoom_factor.set(max(self.zoom_factor.get() / self.zoom_increment, 0.05)); self.schedule_interactive_update()
@@ -443,7 +550,7 @@ class ImageEvolverApp:
         self._cancel_post_pan_animation()
         self.zoom_factor.set(1.0); self.view_center_x_norm.set(0.5); self.view_center_y_norm.set(0.5); 
         self.schedule_interactive_update()
-    def pan_view(self, dx_factor, dy_factor): # For button pan
+    def pan_view(self, dx_factor, dy_factor): 
         self._cancel_post_pan_animation()
         if not self.input_image_loaded: return
         zoom = self.zoom_factor.get();
@@ -458,30 +565,68 @@ class ImageEvolverApp:
     def trigger_multistep_evolution(self):
         self._cancel_post_pan_animation()
         if not self.input_image_loaded: messagebox.showerror("Error", "Load input image first.", parent=self.root); return
+        
+        self.stop_evolution_requested = False 
+        self.stop_button.config(state=tk.NORMAL) 
+
         try:
             num_steps = int(self.entries["steps"].get())
             output_w = int(self.entries["output_width"].get()); output_h = int(self.entries["output_height"].get())
             if num_steps <= 0 or output_w <= 0 or output_h <= 0: messagebox.showerror("Input Error", "Steps, W, H must be > 0.", parent=self.root); return
             self.status_label.config(text=f"Multi-step Evolving ({num_steps} steps)..."); self.root.update_idletasks()
-            current_processing_img = self._get_image_roi_at_output_resolution(self.current_evolving_image if self.current_evolving_image else self.input_image_loaded, output_w, output_h, step_num_for_multistep=0)
-            if not current_processing_img: self.status_label.config(text="Error: Could not prepare ROI."); return
+            
+            current_processing_img = None
+            zoom_pan_mode = self.zoom_pan_timing_var.get()
+
+            if zoom_pan_mode == "Process ROI (Pre-Effects)":
+                base_for_multistep_start_roi = self.current_evolving_image if self.current_evolving_image else self.input_image_loaded
+                current_processing_img = self._get_image_roi_at_output_resolution(base_for_multistep_start_roi, output_w, output_h, step_num_for_multistep=0)
+            else: 
+                source_for_full_processing = self.current_evolving_image if self.current_evolving_image else self.input_image_loaded
+                if source_for_full_processing.size != (output_w, output_h): current_processing_img = source_for_full_processing.copy().resize((output_w, output_h), Image.Resampling.LANCZOS)
+                else: current_processing_img = source_for_full_processing.copy()
+
+            if not current_processing_img: self.status_label.config(text="Error: Could not prepare ROI/Image for evolution."); return
+            
             frames_to_save = []
             save_frames_enabled = self.save_animation_frames_var.get()
+            
             for step in range(num_steps):
-                base_for_this_step_roi = current_processing_img 
-                roi_content_for_this_step = self._get_image_roi_at_output_resolution(base_for_this_step_roi, output_w, output_h, step_num_for_multistep=step + 1)
-                if not roi_content_for_this_step: break
-                current_processing_img = self._apply_evolution_pipeline_once(roi_content_for_this_step, step_num_for_multistep=step + 1)
+                if self.stop_evolution_requested: self.status_label.config(text=f"Evolution stopped at step {step}."); break
+                if zoom_pan_mode == "Process ROI (Pre-Effects)":
+                    # For "Process ROI", the ROI for the *next* step is based on the *output* of the previous step.
+                    # The LFO for pan (if any) would apply to this *current_processing_img* to select the new ROI.
+                    roi_content_for_this_step = self._get_image_roi_at_output_resolution(current_processing_img, output_w, output_h, step_num_for_multistep=step + 1)
+                    if not roi_content_for_this_step: break
+                    current_processing_img = self._apply_evolution_pipeline_once(roi_content_for_this_step, step_num_for_multistep=step + 1)
+                else: # "View Full Image (Post-Effects)"
+                    # Process the full image. Pan LFOs are only used by display_image in this mode.
+                    # So _get_image_roi_at_output_resolution is not needed to prepare input for pipeline here.
+                    # However, _apply_evolution_pipeline_once needs step_num_for_multistep for its own param LFOs.
+                    # The pan LFOs for this mode happen in _get_image_roi_at_output_resolution, which is called
+                    # by display_image if zoom_pan_mode == "View Full Image (Post-Effects)"
+                    current_processing_img = self._apply_evolution_pipeline_once(current_processing_img, step_num_for_multistep=step + 1)
+
+
                 if save_frames_enabled: frames_to_save.append(current_processing_img.copy())
-                if (step + 1) % 1 == 0 or step == num_steps - 1:
-                    self.current_evolving_image = current_processing_img.copy()
-                    self.display_image(self.current_evolving_image)
+                if (step + 1) % 1 == 0 or step == num_steps - 1: # Update display every step
+                    self.current_evolving_image = current_processing_img.copy() # This is now the full processed image (or processed ROI)
+                    self.display_image(self.current_evolving_image) # Display will handle view if in post-effects mode
                     self.status_label.config(text=f"Multi-Step Evolution: {step + 1}/{num_steps}")
                     self.root.update_idletasks()
-            self.status_label.config(text=f"Multi-step evolution complete ({num_steps} steps).")
+            if not self.stop_evolution_requested: self.status_label.config(text=f"Multi-step evolution complete ({num_steps} steps).")
             if save_frames_enabled and frames_to_save: self.save_animation_frame_sequence(frames_to_save)
         except ValueError as ve: messagebox.showerror("Input Error", f"{ve}", parent=self.root); self.status_label.config(text=f"Input Error: {ve}")
         except Exception as e: messagebox.showerror("Evo Error", f"{e}", parent=self.root); self.status_label.config(text=f"Evo Error: {e}"); traceback.print_exc()
+        finally: 
+            self.stop_button.config(state=tk.DISABLED)
+            self.stop_evolution_requested = False
+
+
+    def request_stop_evolution(self): 
+        self.stop_evolution_requested = True
+        self.status_label.config(text="Stop requested for multi-step evolution...")
+
 
     def save_animation_frame_sequence(self, frames):
         if not frames: return
@@ -501,12 +646,58 @@ class ImageEvolverApp:
         except Exception as e: messagebox.showerror("Frame Save Error", f"{e}", parent=self.root); self.status_label.config(text=f"Error saving frames: {e}"); traceback.print_exc()
 
     def display_image(self, pil_img_to_display):
-        if not pil_img_to_display: self.image_display_label.config(image=''); self.photo_image = None; return
+        if not pil_img_to_display:
+            self.image_display_label.config(image='')
+            self.photo_image = None
+            return
         try:
+            image_for_thumbnail = pil_img_to_display
+            zoom_pan_mode = self.zoom_pan_timing_var.get()
+
+            if zoom_pan_mode == "View Full Image (Post-Effects)":
+                # In this mode, pil_img_to_display is the full processed image.
+                # We need to apply zoom/pan to it for display only.
+                
+                # We need to get the ROI from image_for_thumbnail using current zoom/pan settings
+                # The _get_image_roi_at_output_resolution already resizes to output_w/h.
+                # For display, we want to crop then thumbnail to display label size.
+                
+                src_w, src_h = image_for_thumbnail.size
+                zoom = max(0.01, min(self.zoom_factor.get(), 100.0))
+                # Use current view center (which might be LFO panned if multi-step just ran and display_image is called from there)
+                view_center_x_display_norm = self.view_center_x_norm.get()
+                view_center_y_display_norm = self.view_center_y_norm.get()
+
+                # If LFO pan is active for multi-step, _get_image_roi_at_output_resolution
+                # will return an LFO-panned ROI. For display, we want the *current manual* view.
+                # So, _get_image_roi_at_output_resolution needs to know not to apply LFO if it's just for display.
+                # The step_num_for_multistep=0 in its call from _perform_interactive_update already does this.
+                # For display from multi-step, we use the direct image.
+                
+                # Simpler: just use the _get_image_roi_at_output_resolution with the display target dims
+                # This will crop and resize.
+                # This might be inefficient if target_display_width/height are large.
+                # Alternative: Crop first, then thumbnail the crop.
+
+                center_x_abs = view_center_x_display_norm * src_w
+                center_y_abs = view_center_y_display_norm * src_h
+                view_w_on_src = src_w / zoom; view_h_on_src = src_h / zoom
+                x0 = center_x_abs - view_w_on_src / 2; y0 = center_y_abs - view_h_on_src / 2
+                x1 = x0 + view_w_on_src; y1 = y0 + view_h_on_src
+                crop_box = (max(0, int(round(x0))), max(0, int(round(y0))),
+                            min(src_w, int(round(x1))), min(src_h, int(round(y1))))
+                if crop_box[2] > crop_box[0] and crop_box[3] > crop_box[1]:
+                    image_for_thumbnail = image_for_thumbnail.crop(crop_box)
+                # else, image_for_thumbnail remains the full image if crop is invalid
+            
             mdw = self.target_display_width if self.target_display_width > 0 else 300
             mdh = self.target_display_height if self.target_display_height > 0 else 300
-            img_copy = pil_img_to_display.copy(); img_copy.thumbnail((mdw, mdh), Image.Resampling.LANCZOS)
-            self.photo_image = ImageTk.PhotoImage(img_copy); self.image_display_label.config(image=self.photo_image)
+            
+            img_copy = image_for_thumbnail.copy() # image_for_thumbnail is now the correct view
+            img_copy.thumbnail((mdw, mdh), Image.Resampling.LANCZOS) # Just thumbnail to fit display
+            
+            self.photo_image = ImageTk.PhotoImage(img_copy)
+            self.image_display_label.config(image=self.photo_image)
         except Exception as e: self.status_label.config(text=f"Display Error: {e}"); traceback.print_exc()
 
     def save_image_as(self):
@@ -536,46 +727,79 @@ class ImageEvolverApp:
         if self.status_label.cget("text").startswith("Continuously"):self.status_label.config(text="Continuous evolution stopped.")
     def continuous_evolve_step(self):
         if not self.hold_evolve_active or not self.input_image_loaded:self.hold_evolve_active=False;return
-        base_img=self.current_evolving_image if self.current_evolving_image else self.input_image_loaded
-        if not base_img:self.hold_evolve_active=False;return
+        
+        source_for_pipeline = self.current_evolving_image if self.current_evolving_image else self.input_image_loaded
+        if not source_for_pipeline: self.hold_evolve_active=False;return
+
         try:
             ow=int(self.entries["output_width"].get());oh=int(self.entries["output_height"].get())
             if ow<=0 or oh<=0:self.hold_evolve_active=False;return
-            img_to_proc=self._get_image_roi_at_output_resolution(base_img,ow,oh, step_num_for_multistep=0) 
-            if not img_to_proc:self.hold_evolve_active=False;return
-            evolved_step=self._apply_evolution_pipeline_once(img_to_proc,step_num_for_multistep=0) 
+
+            image_to_process = None
+            zoom_pan_mode = self.zoom_pan_timing_var.get()
+            if zoom_pan_mode == "Process ROI (Pre-Effects)":
+                image_to_process = self._get_image_roi_at_output_resolution(source_for_pipeline, ow, oh, step_num_for_multistep=0)
+            else: 
+                if source_for_pipeline.size != (ow, oh): image_to_process = source_for_pipeline.copy().resize((ow,oh), Image.Resampling.LANCZOS)
+                else: image_to_process = source_for_pipeline.copy()
+            
+            if not image_to_process:self.hold_evolve_active=False;return
+            
+            evolved_step=self._apply_evolution_pipeline_once(image_to_process,step_num_for_multistep=0) # LFOs not used for hold-to-evolve for simplicity
             self.current_evolving_image=evolved_step;self.display_image(self.current_evolving_image)
             if self.hold_evolve_active:self.hold_evolve_after_id=self.root.after(self.hold_evolve_delay,self.continuous_evolve_step)
         except Exception as e:self.status_label.config(text=f"Cont.Evo Err:{e}");self.hold_evolve_active=False;traceback.print_exc()
 
     def _start_post_pan_animation(self, last_pan_dx, last_pan_dy, input_is_pixel_delta=True):
-        if not self.post_pan_anim_enabled_var.get() or not self.input_image_loaded: return
+        if not self.post_pan_anim_enabled_var.get() or not self.input_image_loaded: 
+            # print("DEBUG: Post-pan start condition not met.")
+            return
         self._cancel_post_pan_animation() 
+        
         if input_is_pixel_delta: 
-            self.post_pan_anim_dx_factor_dir = -1 if last_pan_dx > 1 else (1 if last_pan_dx < -1 else 0) 
-            self.post_pan_anim_dy_factor_dir = -1 if last_pan_dy > 1 else (1 if last_pan_dy < -1 else 0)
+            # If mouse dragged right (positive last_pan_dx), image content moved left.
+            # So, view center effectively moved left relative to content.
+            # Drift should make view center continue moving left (negative factor).
+            self.post_pan_anim_dx_factor_dir = -1 if last_pan_dx > 0.5 else (1 if last_pan_dx < -0.5 else 0) 
+            self.post_pan_anim_dy_factor_dir = -1 if last_pan_dy > 0.5 else (1 if last_pan_dy < -0.5 else 0)
         else: 
             self.post_pan_anim_dx_factor_dir = last_pan_dx
             self.post_pan_anim_dy_factor_dir = last_pan_dy
-        if self.post_pan_anim_dx_factor_dir == 0 and self.post_pan_anim_dy_factor_dir == 0: return
+        
+        # print(f"DEBUG: _start_post_pan_animation. Factors dir: dx={self.post_pan_anim_dx_factor_dir}, dy={self.post_pan_anim_dy_factor_dir}")
+
+        if self.post_pan_anim_dx_factor_dir == 0 and self.post_pan_anim_dy_factor_dir == 0:
+            # print("DEBUG: No drift direction, not starting animation.")
+            return
+
         self.is_post_pan_anim_running = True
         self.post_pan_anim_current_step = 0
         self.status_label.config(text="Post-pan drift...")
+        # print("DEBUG: Kicking off _run_post_pan_animation_step")
         self._run_post_pan_animation_step()
 
     def _run_post_pan_animation_step(self):
-        if not self.is_post_pan_anim_running or not self.input_image_loaded: self.is_post_pan_anim_running = False; return
+        # print(f"DEBUG: _run_post_pan_animation_step called. Running: {self.is_post_pan_anim_running}, Step: {self.post_pan_anim_current_step}")
+        if not self.is_post_pan_anim_running or not self.input_image_loaded:
+            self.is_post_pan_anim_running = False; return
+        
         max_steps = self.post_pan_drift_steps_var.get()
         if self.post_pan_anim_current_step >= max_steps:
             self.is_post_pan_anim_running = False; self.status_label.config(text="Post-pan drift finished."); 
             return
+
         drift_step_size_norm = self.post_pan_drift_amount_var.get()
         effective_pan_x_norm = self.post_pan_anim_dx_factor_dir * drift_step_size_norm
         effective_pan_y_norm = self.post_pan_anim_dy_factor_dir * drift_step_size_norm
-        current_cx = self.view_center_x_norm.get(); current_cy = self.view_center_y_norm.get()
-        new_center_x = current_cx + effective_pan_x_norm; new_center_y = current_cy + effective_pan_y_norm
-        self.view_center_x_norm.set(max(0.0, min(1.0, new_center_x))); self.view_center_y_norm.set(max(0.0, min(1.0, new_center_y)))
-        self.schedule_interactive_update() 
+        
+        # print(f"DEBUG: Post-pan step {self.post_pan_anim_current_step + 1}/{max_steps}, effective_pan_norm: dx={effective_pan_x_norm:.5f}, dy={effective_pan_y_norm:.5f}")
+        
+        if abs(effective_pan_x_norm) > 1e-6 or abs(effective_pan_y_norm) > 1e-6 : # Only update if there's actual drift
+            current_cx = self.view_center_x_norm.get(); current_cy = self.view_center_y_norm.get()
+            new_center_x = current_cx + effective_pan_x_norm; new_center_y = current_cy + effective_pan_y_norm
+            self.view_center_x_norm.set(max(0.0, min(1.0, new_center_x))); self.view_center_y_norm.set(max(0.0, min(1.0, new_center_y)))
+            self.schedule_interactive_update() 
+        
         self.post_pan_anim_current_step += 1
         delay_ms = self.post_pan_drift_delay_var.get()
         if delay_ms < 10: delay_ms = 10 
@@ -583,7 +807,10 @@ class ImageEvolverApp:
 
     def _cancel_post_pan_animation(self):
         if self.post_pan_after_id: self.root.after_cancel(self.post_pan_after_id); self.post_pan_after_id = None
+        if self.is_post_pan_anim_running: # Only change status if it was running
+            self.status_label.config(text="Drift cancelled.")
         self.is_post_pan_anim_running = False
+
 
 # 4. SCRIPT EXECUTION
 if __name__ == "__main__":
