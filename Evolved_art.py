@@ -1,33 +1,53 @@
 # 1. IMPORTS
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from PIL import Image, ImageTk, ImageFilter, ImageEnhance, ImageChops, ImageDraw
+from PIL import Image, ImageTk, ImageFilter, ImageEnhance, ImageChops, ImageDraw, ImageColor
 import colorsys 
 import math
 import traceback
 import os 
 import random 
 
-# 2. HELPER FUNCTIONS (None needed at global scope for now)
+# 2. HELPER FUNCTIONS 
+def compose_affine(trans1, trans2):
+    """Composes two affine transformations (Pillow's 6-tuple format)."""
+    a1, b1, c1, d1, e1, f1 = trans1
+    a2, b2, c2, d2, e2, f2 = trans2
+    return (
+        a1*a2 + b1*d2, a1*b2 + b1*e2, a1*c2 + b1*f2 + c1,
+        d1*a2 + e1*d2, d1*b2 + e1*e2, d1*c2 + e1*f2 + f1
+    )
+
+def transform_point(p, trans):
+    """Applies an affine transform to a point."""
+    # Pillow affine: x_new = a*x + b*y + c, y_new = d*x + e*y + f
+    x, y = p
+    a, b, c, d, e, f = trans
+    return (a*x + b*y + c, d*x + e*y + f)
+
+def transform_polygon(poly, trans):
+    """Applies an affine transform to a list of points (polygon)."""
+    return [transform_point(p, trans) for p in poly]
 
 # 3. MAIN APPLICATION CLASS DEFINITION
 class ImageEvolverApp:
     def __init__(self, root_window):
         self.root = root_window
-        self.root.title("Image Evolver - Seamless Kaleidoscope v2.13.10") 
-        self.current_evolving_image = None
+        self.root.title("Image Evolver & Rep-Tiler v3.0.86") 
+        self.current_evolving_image = None 
+        self.current_reptile_image = None  
         self.photo_image = None
-        self.input_image_loaded = None
-        self.input_image_filename_var = tk.StringVar(value="No image loaded.")
+        self.input_image_loaded = None    
+        self.input_image_filename_var = tk.StringVar(value="No image loaded for Evolver.")
+        self.texture_image_for_reptile = None 
+        self.texture_image_filename_var = tk.StringVar(value="No texture loaded for Rep-Tiler.")
+
 
         self.displacement_map_image = None 
         self.displacement_map_filename_var = tk.StringVar(value="No map loaded.")
 
         self.target_display_width = 500
         self.target_display_height = 500
-
-        self.mouse_x_norm = tk.DoubleVar(value=0.5) 
-        self.mouse_y_norm = tk.DoubleVar(value=0.5) 
         
         self.after_id_preview = None 
         self.interactive_update_delay = 75 
@@ -62,7 +82,7 @@ class ImageEvolverApp:
         self.post_pan_anim_enabled_var = tk.BooleanVar(value=False)
         self.post_pan_drift_steps_var = tk.IntVar(value=10) 
         self.post_pan_drift_delay_var = tk.IntVar(value=40) 
-        self.post_pan_drift_amount_var = tk.DoubleVar(value=0.015) # Slightly increased default
+        self.post_pan_drift_amount_var = tk.DoubleVar(value=0.01)
         self.is_post_pan_anim_running = False
         self.post_pan_anim_dx_factor_dir = 0.0 
         self.post_pan_anim_dy_factor_dir = 0.0 
@@ -77,54 +97,85 @@ class ImageEvolverApp:
 
         self.stop_evolution_requested = False
 
+        self.app_mode_var = tk.StringVar(value="Image Evolver")
+        self.app_mode_options = ["Image Evolver", "Rep-Tile Patterner"]
+
+        self.reptile_type_var = tk.StringVar(value="L-Tromino")
+        self.reptile_options = ["L-Tromino", "Ammann Rhombus", "Ammann Thin Rhombus", "Custom IFS Fractal"] 
+        self.reptile_recursion_depth = tk.IntVar(value=2) 
+        self.reptile_output_width = tk.IntVar(value=512)
+        self.reptile_output_height = tk.IntVar(value=512)
+        self.reptile_use_texture_var = tk.BooleanVar(value=False)
+        
+        self.reptile_texture_effect_var = tk.StringVar(value="Tile (Global Coords)")
+        self.reptile_texture_effect_options = [
+            "Tile (Global Coords)", 
+            "Stretch to Unit", 
+            "Rotate & Tile (per Unit)"
+        ]
+        self.reptile_background_type_var = tk.StringVar(value="Default Canvas (Black)") 
+        self.reptile_background_options = [                                         
+            "Default Canvas (Black)", "Solid Color (Light Gray)", 
+            "Transparent (PNG only)", "Tile with Texture"
+        ]
+
+        # IFS Parameters
+        self.ifs_iterations_var = tk.IntVar(value=50000) 
+        self.ifs_unit_canvas_size_var = tk.IntVar(value=256) 
+        self.ifs_scale_var = tk.DoubleVar(value=50.0) 
+        self.ifs_offset_x_var = tk.DoubleVar(value=128.0) 
+        self.ifs_offset_y_var = tk.DoubleVar(value=128.0) 
+        self.ifs_point_color_var = tk.StringVar(value="palette") 
+        self.ifs_tile_rotation_var = tk.DoubleVar(value=0.0)
+        self.selected_ifs_example_var = tk.StringVar(value="Example 1 (Sierpinski-like)")
+
+
+        # Define sets of IFS transformations
+        self.ifs_example_sets = {
+            "Example 1 (Sierpinski-like)": [
+                {'coefs_xml': (0, 0.7071067811865476, -0.7071067811865475, 0, 0, 0), 'weight': 0.5, 'color_idx': 0},
+                {'coefs_xml': (-0.5, 0.0, 0.0, -0.5, -1.0, -0.7071067811865476), 'weight': 0.25, 'color_idx': 1},
+                {'coefs_xml': (0.5, 0.0, 0.0, 0.5, -0.5, 0), 'weight': 0.25, 'color_idx': 2}
+            ],
+            "Example 2 (User Provided)": [
+                {'coefs_xml': (0, 0.7071067811865476, 0.7071067811865475, 0, 0, 0), 'weight': 0.5, 'color_idx': 0},
+                {'coefs_xml': (0.5, 0.0, 0.0, 0.5, 0.5, 0), 'weight': 0.25, 'color_idx': 1},
+                {'coefs_xml': (-0.5, 0.0, 0.0, -0.5, 0.5, 0.7071067811865476), 'weight': 0.25, 'color_idx': 2}
+            ]
+        }
+        
+        self.ifs_transform_vars = [] 
+        default_example_data = self.ifs_example_sets[self.selected_ifs_example_var.get()]
+        for i in range(max(len(data_set) for data_set in self.ifs_example_sets.values())): 
+            if i < len(default_example_data):
+                data = default_example_data[i]
+                xml_c = data['coefs_xml']
+                self.ifs_transform_vars.append({
+                    'a': tk.DoubleVar(value=xml_c[0]),      
+                    'b': tk.DoubleVar(value=xml_c[1]),      
+                    'c': tk.DoubleVar(value=xml_c[4]),      
+                    'd': tk.DoubleVar(value=xml_c[2]),      
+                    'e': tk.DoubleVar(value=xml_c[3]),      
+                    'f': tk.DoubleVar(value=xml_c[5]),      
+                    'weight': tk.DoubleVar(value=data['weight']),
+                    'color_idx': tk.IntVar(value=data.get('color_idx', i)) 
+                })
+            else: 
+                 self.ifs_transform_vars.append({
+                    'a': tk.DoubleVar(value=0.0), 'b': tk.DoubleVar(value=0.0), 'c': tk.DoubleVar(value=0.0),
+                    'd': tk.DoubleVar(value=0.0), 'e': tk.DoubleVar(value=0.0), 'f': tk.DoubleVar(value=0.0),
+                    'weight': tk.DoubleVar(value=0.0),'color_idx': tk.IntVar(value=i) 
+                })
+
+        self.ifs_color_palette = [(0,255,0), (255,0,0), (0,0,255), (255,255,0), (255,0,255), (0,255,255)]
+
+
         self.entries = {}
         self.op_vars = {} 
         self.op_params = {} 
         self.anim_vars = {} 
         self.anim_params = {}
         
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky="nsew")
-        self.root.columnconfigure(0, weight=1); self.root.rowconfigure(0, weight=1)
-
-        canvas = tk.Canvas(main_frame, borderwidth=0, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
-        self.controls_scrollable_frame = ttk.Frame(canvas, padding="10")
-        self.controls_scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"), width=e.width))
-        canvas.create_window((0, 0), window=self.controls_scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.grid(row=0, column=0, sticky="nswe")
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        main_frame.columnconfigure(0, weight=0, minsize=460) 
-        main_frame.rowconfigure(0, weight=1)
-        
-        csr = 0 
-
-        input_frame = ttk.LabelFrame(self.controls_scrollable_frame, text="Image Input", padding="10")
-        input_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=5); csr += 1
-        self.load_image_button = ttk.Button(input_frame, text="Load Image File", command=self.load_input_image)
-        self.load_image_button.grid(row=0, column=0, columnspan=2, sticky="we", padx=5, pady=2)
-        self.loaded_image_label = ttk.Label(input_frame, textvariable=self.input_image_filename_var, wraplength=180)
-        self.loaded_image_label.grid(row=0, column=2, columnspan=2, sticky=tk.W, padx=5, pady=2)
-        ttk.Label(input_frame, text="Starter Shape:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
-        self.starter_shape_combo = ttk.Combobox(input_frame, textvariable=self.starter_shape_type_var, values=self.starter_shape_options, state="readonly", width=18)
-        self.starter_shape_combo.grid(row=1, column=1, sticky="we", padx=5, pady=2)
-        self.generate_starter_button = ttk.Button(input_frame, text="Generate Starter", command=self.generate_and_load_starter_shape)
-        self.generate_starter_button.grid(row=1, column=2, columnspan=2, sticky="we", padx=5, pady=2)
-
-        ttk.Label(self.controls_scrollable_frame, text="Evolution Steps:").grid(row=csr, column=0, sticky=tk.W, padx=5, pady=3)
-        self.entries["steps"] = tk.StringVar(value="10") 
-        ttk.Entry(self.controls_scrollable_frame, textvariable=self.entries["steps"], width=10).grid(row=csr, column=1, sticky="we", padx=5, pady=3)
-        ttk.Label(self.controls_scrollable_frame, text="Proc. Width:").grid(row=csr, column=2, sticky=tk.W, padx=5, pady=3) 
-        self.entries["output_width"] = tk.StringVar(value="512")
-        ttk.Entry(self.controls_scrollable_frame, textvariable=self.entries["output_width"], width=10).grid(row=csr, column=3, sticky="we", padx=5, pady=3); csr += 1
-        ttk.Label(self.controls_scrollable_frame, text="Proc. Height:").grid(row=csr, column=0, sticky=tk.W, padx=5, pady=3) 
-        self.entries["output_height"] = tk.StringVar(value="512")
-        ttk.Entry(self.controls_scrollable_frame, textvariable=self.entries["output_height"], width=10).grid(row=csr, column=1, sticky="we", padx=5, pady=3); csr += 1
-
-        op_frame = ttk.LabelFrame(self.controls_scrollable_frame, text="Evolution Operations Pipeline", padding="10")
-        op_frame.grid(row=csr, column=0, columnspan=4, sticky="new", padx=5, pady=10); csr +=1
-        op_cr = 0
         self.operations_config = {
             "blur": {"var_key": "blur_enabled", "label": "Blur", "params": {"radius": {"var_key": "blur_radius", "default": 0.0, "min": 0.0, "max": 5.0, "label": "Radius:", "anim_config": {"amp_default": 0.5, "period_default": 40, "amp_min":0, "amp_max":2, "period_min":10, "period_max":100}}}},
             "unsharp_mask": {"var_key": "unsharp_enabled", "label": "Unsharp Mask", "params": {"radius": {"var_key": "unsharp_radius", "default": 2, "min": 0, "max": 10, "label": "Rad:", "is_int": True},"percent": {"var_key": "unsharp_percent", "default": 150, "min": 50, "max": 300, "label": "%:", "is_int": True},"threshold": {"var_key": "unsharp_threshold", "default": 3, "min": 0, "max": 10, "label": "Thr:", "is_int": True}}},
@@ -145,7 +196,95 @@ class ImageEvolverApp:
             "contrast": {"var_key": "contrast_enabled", "label": "Contrast", "params": {"factor": {"var_key": "contrast_factor", "default": 1.0, "min": 0.7, "max": 1.3, "label": "Factor:"}}},
             "saturation": {"var_key": "saturation_enabled", "label": "Saturation", "params": {"factor": {"var_key": "saturation_factor", "default": 1.0, "min": 0.0, "max": 2.0, "label": "Factor:"}}}
         }
+        
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky="nsew")
+        self.root.columnconfigure(0, weight=1); self.root.rowconfigure(0, weight=1)
 
+        self.controls_area_frame = ttk.Frame(main_frame, padding=5)
+        self.controls_area_frame.grid(row=0, column=0, sticky="nswe")
+        main_frame.columnconfigure(0, weight=0, minsize=470) 
+        main_frame.rowconfigure(0, weight=1)
+
+        mode_frame = ttk.LabelFrame(self.controls_area_frame, text="Application Mode", padding=5)
+        mode_frame.pack(fill="x", pady=5, anchor="n") 
+        self.mode_combo = ttk.Combobox(mode_frame, textvariable=self.app_mode_var, values=self.app_mode_options, state="readonly", width=25)
+        self.mode_combo.pack(padx=5, pady=5)
+        self.mode_combo.bind("<<ComboboxSelected>>", self.on_app_mode_change)
+
+        self.evolver_controls_frame = ttk.Frame(self.controls_area_frame)
+        self.reptile_controls_frame = ttk.Frame(self.controls_area_frame)
+        
+        self._setup_evolver_gui(self.evolver_controls_frame) 
+        self._setup_reptile_gui(self.reptile_controls_frame)
+        
+        self.image_display_label = ttk.Label(main_frame, relief="sunken", anchor="center", background="#2B2B2B")
+        self.image_display_label.grid(row=0, column=1, padx=10, pady=10, sticky="nsew") 
+        main_frame.columnconfigure(1, weight=1); main_frame.rowconfigure(0, weight=1) 
+        
+        self.image_display_label.bind("<Motion>", self.on_mouse_move_over_image)
+        self.image_display_label.bind("<Leave>", self.on_mouse_leave_image)
+        self.image_display_label.bind("<ButtonPress-1>", self.on_pan_start)
+        self.image_display_label.bind("<B1-Motion>", self.on_pan_drag)
+        self.image_display_label.bind("<ButtonRelease-1>", self.on_pan_end)
+
+        self.root.after(200, self._capture_initial_display_size)
+        self.on_app_mode_change() 
+
+    def on_app_mode_change(self, event=None):
+        selected_mode = self.app_mode_var.get()
+        if selected_mode == "Image Evolver":
+            self.reptile_controls_frame.pack_forget()
+            self.evolver_controls_frame.pack(fill="both", expand=True)
+            display_img = self.current_evolving_image if self.current_evolving_image else self.input_image_loaded
+            if display_img: self.display_image(display_img)
+            else: self.image_display_label.config(image='') 
+            if hasattr(self, 'status_label'): self.status_label.config(text="Image Evolver mode.")
+        elif selected_mode == "Rep-Tile Patterner":
+            self.evolver_controls_frame.pack_forget()
+            self.reptile_controls_frame.pack(fill="both", expand=True)
+            if self.current_reptile_image: self.display_image(self.current_reptile_image)
+            else: self.image_display_label.config(image='')
+            if hasattr(self, 'status_label_reptile'): self.status_label_reptile.config(text="Rep-Tile Patterner mode.")
+        self._toggle_ifs_sphinx_controls() 
+
+
+    def _setup_evolver_gui(self, parent_frame):
+        canvas = tk.Canvas(parent_frame, borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(parent_frame, orient="vertical", command=canvas.yview)
+        self.evolver_scrollable_frame = ttk.Frame(canvas, padding="10") 
+        self.evolver_scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"), width=e.width))
+        canvas.create_window((0, 0), window=self.evolver_scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        csr = 0 
+        input_frame = ttk.LabelFrame(self.evolver_scrollable_frame, text="Image Input (Evolver)", padding="10")
+        input_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=5); csr += 1
+        self.load_image_button_evolver = ttk.Button(input_frame, text="Load Image File", command=self.load_input_image) 
+        self.load_image_button_evolver.grid(row=0, column=0, columnspan=2, sticky="we", padx=5, pady=2)
+        self.loaded_image_label_evolver = ttk.Label(input_frame, textvariable=self.input_image_filename_var, wraplength=180) 
+        self.loaded_image_label_evolver.grid(row=0, column=2, columnspan=2, sticky=tk.W, padx=5, pady=2)
+        ttk.Label(input_frame, text="Starter Shape:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
+        self.starter_shape_combo_evolver = ttk.Combobox(input_frame, textvariable=self.starter_shape_type_var, values=self.starter_shape_options, state="readonly", width=18) 
+        self.starter_shape_combo_evolver.grid(row=1, column=1, sticky="we", padx=5, pady=2)
+        self.generate_starter_button_evolver = ttk.Button(input_frame, text="Generate Starter", command=self.generate_and_load_starter_shape) 
+        self.generate_starter_button_evolver.grid(row=1, column=2, columnspan=2, sticky="we", padx=5, pady=2)
+
+        ttk.Label(self.evolver_scrollable_frame, text="Evolution Steps:").grid(row=csr, column=0, sticky=tk.W, padx=5, pady=3)
+        if "steps" not in self.entries: self.entries["steps"] = tk.StringVar(value="10")
+        ttk.Entry(self.evolver_scrollable_frame, textvariable=self.entries["steps"], width=10).grid(row=csr, column=1, sticky="we", padx=5, pady=3)
+        ttk.Label(self.evolver_scrollable_frame, text="Proc. Width:").grid(row=csr, column=2, sticky=tk.W, padx=5, pady=3) 
+        if "output_width" not in self.entries: self.entries["output_width"] = tk.StringVar(value="512")
+        ttk.Entry(self.evolver_scrollable_frame, textvariable=self.entries["output_width"], width=10).grid(row=csr, column=3, sticky="we", padx=5, pady=3); csr += 1
+        ttk.Label(self.evolver_scrollable_frame, text="Proc. Height:").grid(row=csr, column=0, sticky=tk.W, padx=5, pady=3) 
+        if "output_height" not in self.entries: self.entries["output_height"] = tk.StringVar(value="512")
+        ttk.Entry(self.evolver_scrollable_frame, textvariable=self.entries["output_height"], width=10).grid(row=csr, column=1, sticky="we", padx=5, pady=3); csr += 1
+
+        op_frame = ttk.LabelFrame(self.evolver_scrollable_frame, text="Evolution Operations Pipeline", padding="10")
+        op_frame.grid(row=csr, column=0, columnspan=4, sticky="new", padx=5, pady=10); csr +=1
+        op_cr = 0
         for op_key_cfg, config in self.operations_config.items():
             default_op_state = op_key_cfg in [] 
             self.op_vars[config["var_key"]] = tk.BooleanVar(value=default_op_state);
@@ -183,15 +322,15 @@ class ImageEvolverApp:
                 param_gui_row +=1
             op_cr += 1
         
-        symmetry_frame = ttk.LabelFrame(self.controls_scrollable_frame, text="Symmetry (Applied Last)", padding="10"); symmetry_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr +=1
+        symmetry_frame = ttk.LabelFrame(self.evolver_scrollable_frame, text="Symmetry (Applied Last)", padding="10"); symmetry_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr +=1
         ttk.Label(symmetry_frame, text="Type:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=2)
-        self.symmetry_combo = ttk.Combobox(symmetry_frame, textvariable=self.symmetry_type_var, values=self.symmetry_options, state="readonly", width=25); self.symmetry_combo.grid(row=0, column=1, columnspan=3, sticky="ew", padx=5, pady=2)
+        self.symmetry_combo_evolver = ttk.Combobox(symmetry_frame, textvariable=self.symmetry_type_var, values=self.symmetry_options, state="readonly", width=25); self.symmetry_combo_evolver.grid(row=0, column=1, columnspan=3, sticky="ew", padx=5, pady=2) 
         
-        view_controls_frame = ttk.LabelFrame(self.controls_scrollable_frame, text="View & ROI Controls", padding="10"); view_controls_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr +=1
+        view_controls_frame = ttk.LabelFrame(self.evolver_scrollable_frame, text="View & ROI Controls", padding="10"); view_controls_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr +=1
         vc_row = 0
         ttk.Label(view_controls_frame, text="Zoom/Pan Mode:").grid(row=vc_row, column=0, sticky=tk.W, padx=5, pady=2)
-        self.zoom_pan_timing_combo = ttk.Combobox(view_controls_frame, textvariable=self.zoom_pan_timing_var, values=self.zoom_pan_timing_options, state="readonly", width=25)
-        self.zoom_pan_timing_combo.grid(row=vc_row, column=1, columnspan=3, sticky="ew", padx=5, pady=2)
+        self.zoom_pan_timing_combo_evolver = ttk.Combobox(view_controls_frame, textvariable=self.zoom_pan_timing_var, values=self.zoom_pan_timing_options, state="readonly", width=25) 
+        self.zoom_pan_timing_combo_evolver.grid(row=vc_row, column=1, columnspan=3, sticky="ew", padx=5, pady=2)
         vc_row+=1
         zoom_btn_subframe = ttk.Frame(view_controls_frame); zoom_btn_subframe.grid(row=vc_row, column=0, columnspan=4, pady=2); vc_row+=1
         ttk.Button(zoom_btn_subframe, text="Zoom In (+)", command=self.zoom_in_view).pack(side=tk.LEFT, padx=5); ttk.Button(zoom_btn_subframe, text="Zoom Out (-)", command=self.zoom_out_view).pack(side=tk.LEFT, padx=5); ttk.Button(zoom_btn_subframe, text="Reset View", command=self.reset_view).pack(side=tk.LEFT, padx=5)
@@ -203,53 +342,218 @@ class ImageEvolverApp:
         self.anim_vars["pan_y_anim_enabled"] = tk.BooleanVar(value=False); self.anim_params["pan_y_anim_amp"] = tk.DoubleVar(value=0.1); self.anim_params["pan_y_anim_period"] = tk.IntVar(value=60)
         pan_y_lfo_frame = ttk.Frame(view_controls_frame); pan_y_lfo_frame.grid(row=vc_row, column=0, columnspan=4, pady=2, sticky=tk.W); vc_row+=1; ttk.Checkbutton(pan_y_lfo_frame, text="Animate Pan Y", variable=self.anim_vars["pan_y_anim_enabled"]).pack(side=tk.LEFT); ttk.Label(pan_y_lfo_frame, text="Amp:").pack(side=tk.LEFT, padx=(5,0)); ttk.Entry(pan_y_lfo_frame, textvariable=self.anim_params["pan_y_anim_amp"], width=5).pack(side=tk.LEFT); ttk.Label(pan_y_lfo_frame, text="Per:").pack(side=tk.LEFT, padx=(5,0)); ttk.Entry(pan_y_lfo_frame, textvariable=self.anim_params["pan_y_anim_period"], width=5).pack(side=tk.LEFT)
         
-        post_pan_frame = ttk.LabelFrame(self.controls_scrollable_frame, text="Post-Pan Animation", padding="10"); post_pan_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr += 1; ttk.Checkbutton(post_pan_frame, text="Enable Drift", variable=self.post_pan_anim_enabled_var).grid(row=0, column=0, sticky=tk.W); ttk.Label(post_pan_frame, text="Steps:").grid(row=0, column=1, sticky=tk.E, padx=(10,0)); ttk.Entry(post_pan_frame, textvariable=self.post_pan_drift_steps_var, width=5).grid(row=0, column=2, sticky=tk.W); ttk.Label(post_pan_frame, text="Delay(ms):").grid(row=1, column=1, sticky=tk.E, padx=(10,0)); ttk.Entry(post_pan_frame, textvariable=self.post_pan_drift_delay_var, width=5).grid(row=1, column=2, sticky=tk.W); ttk.Label(post_pan_frame, text="Amount:").grid(row=0, column=3, sticky=tk.E, padx=(10,0)); ttk.Scale(post_pan_frame, variable=self.post_pan_drift_amount_var, from_=0.001, to=0.05, orient=tk.HORIZONTAL, length=80).grid(row=0, column=4, sticky=tk.W); ttk.Label(post_pan_frame, textvariable=self.post_pan_drift_amount_var, width=6).grid(row=0, column=5, sticky=tk.W)
+        post_pan_frame = ttk.LabelFrame(self.evolver_scrollable_frame, text="Post-Pan Animation", padding="10"); post_pan_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr += 1; ttk.Checkbutton(post_pan_frame, text="Enable Drift", variable=self.post_pan_anim_enabled_var).grid(row=0, column=0, sticky=tk.W); ttk.Label(post_pan_frame, text="Steps:").grid(row=0, column=1, sticky=tk.E, padx=(10,0)); ttk.Entry(post_pan_frame, textvariable=self.post_pan_drift_steps_var, width=5).grid(row=0, column=2, sticky=tk.W); ttk.Label(post_pan_frame, text="Delay(ms):").grid(row=1, column=1, sticky=tk.E, padx=(10,0)); ttk.Entry(post_pan_frame, textvariable=self.post_pan_drift_delay_var, width=5).grid(row=1, column=2, sticky=tk.W); ttk.Label(post_pan_frame, text="Amount:").grid(row=0, column=3, sticky=tk.E, padx=(10,0)); ttk.Scale(post_pan_frame, variable=self.post_pan_drift_amount_var, from_=0.001, to=0.05, orient=tk.HORIZONTAL, length=80).grid(row=0, column=4, sticky=tk.W); ttk.Label(post_pan_frame, textvariable=self.post_pan_drift_amount_var, width=6).grid(row=0, column=5, sticky=tk.W)
         
-        feedback_frame = ttk.LabelFrame(self.controls_scrollable_frame, text="Feedback Options", padding="10"); feedback_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr +=1; self.op_vars["blend_original_enabled"] = tk.BooleanVar(value=False); self.op_params["blend_alpha_value"] = tk.DoubleVar(value=0.01); 
+        feedback_frame = ttk.LabelFrame(self.evolver_scrollable_frame, text="Feedback Options", padding="10"); feedback_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr +=1; self.op_vars["blend_original_enabled"] = tk.BooleanVar(value=False); self.op_params["blend_alpha_value"] = tk.DoubleVar(value=0.01); 
         ttk.Checkbutton(feedback_frame, text="Blend with Original", variable=self.op_vars["blend_original_enabled"]).grid(row=0, column=0, sticky=tk.W); ttk.Label(feedback_frame, text="Alpha:").grid(row=0, column=1, sticky=tk.E, padx=2); ttk.Scale(feedback_frame, variable=self.op_params["blend_alpha_value"], from_=0.0, to=0.2, orient=tk.HORIZONTAL, length=100).grid(row=0, column=2, sticky=tk.W); ttk.Label(feedback_frame,textvariable=self.op_params["blend_alpha_value"], width=4).grid(row=0, column=3, sticky=tk.W)
         
-        output_options_frame = ttk.LabelFrame(self.controls_scrollable_frame, text="Output Options", padding="10"); output_options_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr += 1; ttk.Label(output_options_frame, text="Default Filename:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=3); self.entries["default_filename"] = tk.StringVar(value="evolved_art.png"); ttk.Entry(output_options_frame, textvariable=self.entries["default_filename"], width=30).grid(row=0, column=1, columnspan=3, sticky="we", padx=5, pady=3); ttk.Checkbutton(output_options_frame, text="Save All Frames (Multi-Step)", variable=self.save_animation_frames_var).grid(row=1, column=0, columnspan=4, sticky=tk.W, padx=5, pady=3)
+        output_options_frame = ttk.LabelFrame(self.evolver_scrollable_frame, text="Output Options", padding="10"); output_options_frame.grid(row=csr, column=0, columnspan=4, sticky="ew", padx=5, pady=10); csr += 1; ttk.Label(output_options_frame, text="Default Filename:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=3); self.entries["default_filename"] = tk.StringVar(value="evolved_art.png"); ttk.Entry(output_options_frame, textvariable=self.entries["default_filename"], width=30).grid(row=0, column=1, columnspan=3, sticky="we", padx=5, pady=3); ttk.Checkbutton(output_options_frame, text="Save All Frames (Multi-Step)", variable=self.save_animation_frames_var).grid(row=1, column=0, columnspan=4, sticky=tk.W, padx=5, pady=3)
         
-        buttons_frame = ttk.Frame(self.controls_scrollable_frame); buttons_frame.grid(row=csr, column=0, columnspan=4, pady=15, sticky="ew"); csr +=1
+        buttons_frame = ttk.Frame(self.evolver_scrollable_frame); buttons_frame.grid(row=csr, column=0, columnspan=4, pady=15, sticky="ew"); csr +=1
         buttons_frame.columnconfigure(0, weight=1); buttons_frame.columnconfigure(1, weight=1); buttons_frame.columnconfigure(2, weight=1); buttons_frame.columnconfigure(3, weight=1); buttons_frame.columnconfigure(4, weight=1) 
         self.preview_button = ttk.Button(buttons_frame, text="Preview Step", command=self.schedule_interactive_update) 
         self.preview_button.grid(row=0, column=0, padx=2, pady=2, sticky="ew")
-        self.evolve_button = ttk.Button(buttons_frame, text="Multi-Step Evolve", command=self.trigger_multistep_evolution); self.evolve_button.grid(row=0, column=1, padx=2, pady=2, sticky="ew") 
-        self.stop_button = ttk.Button(buttons_frame, text="Stop Evolve", command=self.request_stop_evolution, state=tk.DISABLED) 
-        self.stop_button.grid(row=0, column=2, padx=2, pady=2, sticky="ew") 
-        self.hold_evolve_button = ttk.Button(buttons_frame, text="Hold to Evolve"); self.hold_evolve_button.grid(row=1, column=0, columnspan=2, padx=2, pady=2, sticky="ew"); self.hold_evolve_button.bind("<ButtonPress-1>", self.on_hold_evolve_press); self.hold_evolve_button.bind("<ButtonRelease-1>", self.on_hold_evolve_release) 
-        self.reset_button = ttk.Button(buttons_frame, text="Reset Image", command=self.reset_image_to_original); self.reset_button.grid(row=1, column=2, padx=2, pady=2, sticky="ew") 
-        self.save_button = ttk.Button(buttons_frame, text="Save Image", command=self.save_image_as); self.save_button.grid(row=1, column=3, padx=2, pady=2, sticky="ew") 
+        self.evolve_button_evolver = ttk.Button(buttons_frame, text="Multi-Step Evolve", command=self.trigger_multistep_evolution); self.evolve_button_evolver.grid(row=0, column=1, padx=2, pady=2, sticky="ew") 
+        self.stop_button_evolver = ttk.Button(buttons_frame, text="Stop Evolve", command=self.request_stop_evolution, state=tk.DISABLED) 
+        self.stop_button_evolver.grid(row=0, column=2, padx=2, pady=2, sticky="ew") 
+        self.hold_evolve_button_evolver = ttk.Button(buttons_frame, text="Hold to Evolve"); self.hold_evolve_button_evolver.grid(row=1, column=0, columnspan=2, padx=2, pady=2, sticky="ew"); self.hold_evolve_button_evolver.bind("<ButtonPress-1>", self.on_hold_evolve_press); self.hold_evolve_button_evolver.bind("<ButtonRelease-1>", self.on_hold_evolve_release) 
+        self.reset_button_evolver = ttk.Button(buttons_frame, text="Reset Image", command=self.reset_image_to_original); self.reset_button_evolver.grid(row=1, column=2, padx=2, pady=2, sticky="ew") 
+        self.save_button_evolver = ttk.Button(buttons_frame, text="Save Image", command=self.save_image_as); self.save_button_evolver.grid(row=1, column=3, padx=2, pady=2, sticky="ew") 
         
-        self.status_label = ttk.Label(self.controls_scrollable_frame, text="Load an image. Adjust parameters and click 'Preview Step'.", wraplength=380); self.status_label.grid(row=csr, column=0, columnspan=4, pady=5, sticky=tk.W); csr+=1
-        
-        self.image_display_label = ttk.Label(main_frame, relief="sunken", anchor="center", background="#2B2B2B")
-        self.image_display_label.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
-        main_frame.columnconfigure(2, weight=1); main_frame.rowconfigure(0, weight=1)
-        
-        self.image_display_label.bind("<Motion>", self.on_mouse_move_over_image)
-        self.image_display_label.bind("<Leave>", self.on_mouse_leave_image)
-        self.image_display_label.bind("<ButtonPress-1>", self.on_pan_start)
-        self.image_display_label.bind("<B1-Motion>", self.on_pan_drag)
-        self.image_display_label.bind("<ButtonRelease-1>", self.on_pan_end)
+        self.status_label = ttk.Label(self.evolver_scrollable_frame, text="Load an image. Adjust parameters and click 'Preview Step'.", wraplength=380); self.status_label.grid(row=csr, column=0, columnspan=4, pady=5, sticky=tk.W); csr+=1
+        # End Evolver GUI
 
-        self.root.after(200, self._capture_initial_display_size)
+    def _setup_reptile_gui(self, parent_frame):
+        csr_rep = 0
+        ttk.Label(parent_frame, text="Rep-Tile Type:").grid(row=csr_rep, column=0, sticky=tk.W, padx=5, pady=5)
+        self.reptile_type_combo = ttk.Combobox(parent_frame, textvariable=self.reptile_type_var, values=self.reptile_options, state="readonly", width=20)
+        self.reptile_type_combo.grid(row=csr_rep, column=1,columnspan=3, sticky="ew", padx=5, pady=5); csr_rep+=1
+        self.reptile_type_combo.bind("<<ComboboxSelected>>", self._toggle_ifs_sphinx_controls)
+
+        # Controls common to most rep-tiles (L-Tromino, Sphinx)
+        self.common_reptile_controls_frame = ttk.Frame(parent_frame)
+        self.common_reptile_controls_frame.grid(row=csr_rep, column=0, columnspan=4, sticky="ew"); csr_rep+=1
+        
+        ttk.Label(self.common_reptile_controls_frame, text="Recursion Depth:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        self.recursion_depth_entry = ttk.Entry(self.common_reptile_controls_frame, textvariable=self.reptile_recursion_depth, width=5)
+        self.recursion_depth_entry.grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
+
+        ttk.Label(self.common_reptile_controls_frame, text="Output Width:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        ttk.Entry(self.common_reptile_controls_frame, textvariable=self.reptile_output_width, width=7).grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(self.common_reptile_controls_frame, text="Output Height:").grid(row=1, column=2, sticky=tk.W, padx=5, pady=5)
+        ttk.Entry(self.common_reptile_controls_frame, textvariable=self.reptile_output_height, width=7).grid(row=1, column=3, sticky=tk.W, padx=5, pady=5)
+        
+        # Background Options
+        bg_options_frame = ttk.LabelFrame(parent_frame, text="Background Options", padding=5)
+        bg_options_frame.grid(row=csr_rep, column=0, columnspan=4, sticky="ew", pady=5); csr_rep+=1
+        ttk.Label(bg_options_frame, text="Fill Empty Space:").pack(side=tk.LEFT, padx=5)
+        self.reptile_bg_combo = ttk.Combobox(bg_options_frame, textvariable=self.reptile_background_type_var, values=self.reptile_background_options, state="readonly", width=25)
+        self.reptile_bg_combo.pack(side=tk.LEFT, padx=5)
+
+
+        texture_options_frame = ttk.LabelFrame(parent_frame, text="Texture Options", padding=5) 
+        texture_options_frame.grid(row=csr_rep, column=0, columnspan=4, sticky="ew", pady=5); csr_rep+=1
+        
+        ttk.Checkbutton(texture_options_frame, text="Use Texture on Tiles", variable=self.reptile_use_texture_var).pack(side=tk.LEFT, padx=5) 
+        self.reptile_texture_effect_combo = ttk.Combobox(texture_options_frame, textvariable=self.reptile_texture_effect_var, values=self.reptile_texture_effect_options, state="readonly", width=25)
+        self.reptile_texture_effect_combo.pack(side=tk.LEFT, padx=5)
+        
+        load_texture_frame = ttk.Frame(parent_frame)
+        load_texture_frame.grid(row=csr_rep, column=0, columnspan=4, sticky="ew", pady=2); csr_rep+=1
+        self.reptile_load_texture_button = ttk.Button(load_texture_frame, text="Load Custom Texture", command=self.load_texture_for_reptile) 
+        self.reptile_load_texture_button.pack(side=tk.LEFT, padx=5, pady=2)
+        ttk.Label(load_texture_frame, textvariable=self.texture_image_filename_var).pack(side=tk.LEFT, padx=5, pady=2, fill=tk.X, expand=True)
+
+        # --- Dynamic Parameter Frames ---
+        # Sphinx parameters LabelFrame (kept for structure, but won't be shown as Sphinx is removed)
+        self.sphinx_params_lf = ttk.LabelFrame(parent_frame, text="Sphinx Child Affine Transforms (a,b,c,d,e,f)", padding=5)
+        # No actual controls for Sphinx are created here anymore, but the frame variable is kept for _toggle_ifs_sphinx_controls
+
+        self.ifs_params_lf = ttk.LabelFrame(parent_frame, text="Custom IFS Parameters", padding=5)
+        
+        # IFS Example Loader
+        ifs_example_loader_frame = ttk.Frame(self.ifs_params_lf)
+        ifs_example_loader_frame.pack(fill="x", pady=(0,5))
+        ttk.Label(ifs_example_loader_frame, text="Load Example:").pack(side=tk.LEFT, padx=5)
+        self.ifs_example_combo = ttk.Combobox(ifs_example_loader_frame, textvariable=self.selected_ifs_example_var, 
+                                              values=list(self.ifs_example_sets.keys()), state="readonly", width=25)
+        self.ifs_example_combo.pack(side=tk.LEFT, padx=5)
+        self.ifs_example_combo.bind("<<ComboboxSelected>>", self._load_selected_ifs_example)
+        
+        ifs_f1 = ttk.Frame(self.ifs_params_lf); ifs_f1.pack(fill="x")
+        ttk.Label(ifs_f1, text="Iterations:").pack(side=tk.LEFT, padx=5)
+        ttk.Entry(ifs_f1, textvariable=self.ifs_iterations_var, width=10).pack(side=tk.LEFT, padx=5)
+        ttk.Label(ifs_f1, text="Point Color:").pack(side=tk.LEFT, padx=5)
+        ttk.Entry(ifs_f1, textvariable=self.ifs_point_color_var, width=10).pack(side=tk.LEFT, padx=5)
+
+        ifs_f2 = ttk.Frame(self.ifs_params_lf); ifs_f2.pack(fill="x", pady=2)
+        ttk.Label(ifs_f2, text="Unit Size:").pack(side=tk.LEFT, padx=5)
+        ttk.Entry(ifs_f2, textvariable=self.ifs_unit_canvas_size_var, width=7).pack(side=tk.LEFT, padx=5)
+        ttk.Label(ifs_f2, text="IFS Scale:").pack(side=tk.LEFT, padx=5) 
+        ttk.Entry(ifs_f2, textvariable=self.ifs_scale_var, width=7).pack(side=tk.LEFT, padx=5)
+        
+        ifs_f3 = ttk.Frame(self.ifs_params_lf); ifs_f3.pack(fill="x", pady=2)
+        ttk.Label(ifs_f3, text="Offset X:").pack(side=tk.LEFT, padx=5)
+        ttk.Entry(ifs_f3, textvariable=self.ifs_offset_x_var, width=7).pack(side=tk.LEFT, padx=5)
+        ttk.Label(ifs_f3, text="Offset Y:").pack(side=tk.LEFT, padx=5)
+        ttk.Entry(ifs_f3, textvariable=self.ifs_offset_y_var, width=7).pack(side=tk.LEFT, padx=5)
+        
+        ifs_f4 = ttk.Frame(self.ifs_params_lf); ifs_f4.pack(fill="x", pady=2) 
+        ttk.Label(ifs_f4, text="Tile Rotation (deg):").pack(side=tk.LEFT, padx=5)
+        ttk.Entry(ifs_f4, textvariable=self.ifs_tile_rotation_var, width=7).pack(side=tk.LEFT, padx=5)
+
+        self.ifs_coeffs_lf = ttk.LabelFrame(self.ifs_params_lf, text="IFS Transform Coefficients (a,b,c,d,e,f) & Weight", padding=3)
+        self.ifs_coeffs_lf.pack(fill="x", pady=5)
+
+        ifs_param_labels = ['a', 'b', 'c(tx)', 'd', 'e', 'f(ty)', 'w']
+        for i in range(len(self.ifs_transform_vars)): 
+            transform_f = ttk.Frame(self.ifs_coeffs_lf, padding=1)
+            transform_f.pack(fill="x")
+            ttk.Label(transform_f, text=f"T{i}:").pack(side=tk.LEFT, padx=(0,1))
+            keys_ordered = ['a','b','c','d','e','f', 'weight']
+            for k_idx, key in enumerate(keys_ordered):
+                ttk.Label(transform_f, text=f"{ifs_param_labels[k_idx]}:").pack(side=tk.LEFT, padx=(2 if k_idx > 0 else 0,0))
+                ttk.Entry(transform_f, textvariable=self.ifs_transform_vars[i][key], width=6).pack(side=tk.LEFT)
+        
+        self.root.after(100, self._toggle_ifs_sphinx_controls) 
+
+        # Buttons for Rep-Tiler
+        self.reptile_action_frame = ttk.Frame(parent_frame) 
+        
+        self.generate_reptile_button = ttk.Button(self.reptile_action_frame, text="Generate Rep-Tile Pattern", command=self.trigger_reptile_generation)
+        self.generate_reptile_button.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+        
+        self.save_reptile_button = ttk.Button(self.reptile_action_frame, text="Save Rep-Tile", command=self.save_reptile_image)
+        self.save_reptile_button.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+
+        self.send_to_evolver_button = ttk.Button(self.reptile_action_frame, text="Send to Evolver", command=self.send_reptile_to_evolver)
+        self.send_to_evolver_button.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+        
+        self.status_label_reptile = ttk.Label(parent_frame, text="Select Rep-Tile options and generate.")
+        
+        self._toggle_ifs_sphinx_controls() 
+
+
+    def _toggle_ifs_sphinx_controls(self, event=None):
+        """Shows/hides IFS or Sphinx specific controls based on reptile_type_var."""
+        tile_type = self.reptile_type_var.get()
+        
+        if not hasattr(self, 'sphinx_params_lf') or not hasattr(self, 'ifs_params_lf') or \
+           not hasattr(self, 'common_reptile_controls_frame') or not hasattr(self, 'recursion_depth_entry') or \
+           not hasattr(self, 'generate_reptile_button') or not hasattr(self, 'status_label_reptile') or \
+           not hasattr(self, 'reptile_action_frame'): 
+            return 
+
+        current_row = self._get_next_reptile_gui_row() 
+
+        self.sphinx_params_lf.grid_remove() 
+        self.ifs_params_lf.grid_remove()
+        self.recursion_depth_entry.config(state='normal') 
+        self.reptile_texture_effect_combo.config(state='readonly') 
+
+
+        if tile_type == "Custom IFS Fractal":
+            self.ifs_params_lf.grid(row=current_row, column=0, columnspan=4, sticky="ew", pady=5)
+            current_row += 1 
+        elif tile_type == "Sphinx Tile": # This option is no longer in self.reptile_options
+            self.reptile_texture_effect_combo.config(state='disabled') 
+        else: # L-Tromino or Ammann Rhombus
+             self.reptile_texture_effect_combo.config(state='readonly') 
+            
+        self.reptile_action_frame.grid(row=current_row, column=0, columnspan=4, pady=5, sticky="ew")
+        current_row +=1
+        
+        self.status_label_reptile.grid(row=current_row, column=0, columnspan=4, pady=5, sticky=tk.W)
+
+
+    def _get_next_reptile_gui_row(self):
+        """Helper to find the next available row in reptile_controls_frame for dynamic controls."""
+        return 5 
+
+    def _load_selected_ifs_example(self, event=None):
+        """Loads the selected IFS example coefficients into the GUI variables."""
+        selected_example_name = self.selected_ifs_example_var.get()
+        if selected_example_name in self.ifs_example_sets:
+            example_data = self.ifs_example_sets[selected_example_name]
+            for i in range(len(self.ifs_transform_vars)):
+                if i < len(example_data):
+                    data = example_data[i]
+                    xml_c = data['coefs_xml']
+                    self.ifs_transform_vars[i]['a'].set(xml_c[0])
+                    self.ifs_transform_vars[i]['b'].set(xml_c[1])
+                    self.ifs_transform_vars[i]['c'].set(xml_c[4]) # tx
+                    self.ifs_transform_vars[i]['d'].set(xml_c[2])
+                    self.ifs_transform_vars[i]['e'].set(xml_c[3])
+                    self.ifs_transform_vars[i]['f'].set(xml_c[5]) # ty
+                    self.ifs_transform_vars[i]['weight'].set(data['weight'])
+                    self.ifs_transform_vars[i]['color_idx'].set(data.get('color_idx', i))
+                else: # Clear any extra vars if current example is smaller
+                    self.ifs_transform_vars[i]['a'].set(0.0)
+                    self.ifs_transform_vars[i]['b'].set(0.0)
+                    self.ifs_transform_vars[i]['c'].set(0.0)
+                    self.ifs_transform_vars[i]['d'].set(0.0)
+                    self.ifs_transform_vars[i]['e'].set(0.0)
+                    self.ifs_transform_vars[i]['f'].set(0.0)
+                    self.ifs_transform_vars[i]['weight'].set(0.0)
+                    self.ifs_transform_vars[i]['color_idx'].set(i)
+
 
     # --- METHOD DEFINITIONS ---
     def _capture_initial_display_size(self):
         self.root.update_idletasks();label_w=self.image_display_label.winfo_width();label_h=self.image_display_label.winfo_height()
         if label_w > 50 and label_h > 50: self.target_display_width=label_w-10;self.target_display_height=label_h-10
 
-    def update_mouse_param_options(self): pass # No longer needed for parameter control
+    def update_mouse_param_options(self): pass
 
     def schedule_interactive_update(self, event=None): 
-        if self.is_post_pan_anim_running: print("DEBUG: Interactive update skipped due to post-pan anim running"); return 
+        if self.app_mode_var.get() != "Image Evolver": return 
+        if self.is_post_pan_anim_running: return 
         if not self.input_image_loaded: return
         if self.after_id_preview: self.root.after_cancel(self.after_id_preview)
         self.after_id_preview = self.root.after(self.interactive_update_delay, self._perform_interactive_update) 
 
     def _perform_interactive_update(self): 
-        # print("DEBUG: _perform_interactive_update called")
+        if self.app_mode_var.get() != "Image Evolver": return
         if not self.input_image_loaded: return
         source_for_pipeline = self.current_evolving_image if self.current_evolving_image else self.input_image_loaded
         if not source_for_pipeline : return 
@@ -290,17 +594,10 @@ class ImageEvolverApp:
             return source_image.copy().resize((target_w,target_h), Image.Resampling.LANCZOS)
         return source_image.crop(crop_box).resize((target_w,target_h), Image.Resampling.LANCZOS)
 
-    def _apply_symmetry(self, image_in): # Updated with more robust 4-way and Kaleidoscope
+    def _apply_symmetry(self, image_in):
         symmetry_type = self.symmetry_type_var.get();
         if symmetry_type == "None" or image_in is None: return image_in
-        
-        img_to_sym = image_in.copy()
-        w, h = img_to_sym.size
-        hw, hh = w // 2, h // 2
-        cx, cy = w / 2.0, h / 2.0 # Use float for center for more precision in kaleidoscope
-        
-        # print(f"DEBUG: _apply_symmetry: Type='{symmetry_type}', Size={w}x{h}, hw={hw}, hh={hh}")
-
+        img_to_sym = image_in.copy(); w, h = img_to_sym.size; hw, hh = w // 2, h // 2
         try:
             if symmetry_type == "Horizontal (Left Master)":
                 if hw <= 0: return img_to_sym 
@@ -316,65 +613,39 @@ class ImageEvolverApp:
                 bottom = img_to_sym.crop((0, hh, w, h)); top_f = bottom.transpose(Image.FLIP_TOP_BOTTOM); img_to_sym.paste(top_f, (0, 0))
             elif symmetry_type == "4-Way Mirror (Top-Left Master)":
                 if hw <= 0 or hh <= 0: return img_to_sym 
-                new_img = Image.new(img_to_sym.mode, (w,h)) 
-                try:
-                    tl = img_to_sym.crop((0,0,hw,hh))
-                    tr = tl.transpose(Image.FLIP_LEFT_RIGHT)
-                    bl = tl.transpose(Image.FLIP_TOP_BOTTOM)
-                    br = tr.transpose(Image.FLIP_TOP_BOTTOM)
-                    new_img.paste(tl,(0,0)); new_img.paste(tr,(hw,0)); 
-                    new_img.paste(bl,(0,hh)); new_img.paste(br,(hw,hh))
-                    img_to_sym = new_img
-                except Exception as e_4way_detail:
-                    print(f"ERROR in 4-Way Mirror detail: {e_4way_detail}"); traceback.print_exc(); return image_in
+                new_img = Image.new('RGB', (w,h), color=(0,0,0)) 
+                tl = img_to_sym.crop((0,0,hw,hh))
+                tr = tl.transpose(Image.FLIP_LEFT_RIGHT)
+                bl = tl.transpose(Image.FLIP_TOP_BOTTOM)
+                br = tr.transpose(Image.FLIP_TOP_BOTTOM)
+                new_img.paste(tl,(0,0)); new_img.paste(tr,(hw,0)); 
+                new_img.paste(bl,(0,hh)); new_img.paste(br,(hw,hh))
+                img_to_sym = new_img
             elif symmetry_type == "2-Fold Rotational (Average)": img_to_sym = Image.blend(img_to_sym, img_to_sym.rotate(180), alpha=0.5)
             elif symmetry_type.startswith("Kaleidoscope"):
                 folds = 6 if "6-fold" in symmetry_type else 8
-                angle_slice_rad = math.pi / folds # Angle of the primary reflective wedge
-                
+                angle_slice_rad = math.pi / folds 
                 output_img = Image.new(image_in.mode, (w, h))
-                target_pixels = output_img.load()
-                source_pixels = image_in.load()
-
+                target_pixels = output_img.load(); source_pixels = image_in.load()
                 for yt_target in range(h):
                     for xt_target in range(w):
-                        # Translate to center
-                        vx = xt_target - cx
-                        vy = yt_target - cy
-                        
-                        angle = math.atan2(vy, vx)
-                        radius = math.sqrt(vx*vx + vy*vy)
-                        
-                        # Modulo angle into the first segment (0 to 2*angle_slice)
+                        vx = xt_target - (w/2.0); vy = yt_target - (h/2.0)
+                        angle = math.atan2(vy, vx); radius = math.sqrt(vx*vx + vy*vy)
                         angle = angle % (2 * angle_slice_rad)
-                        # Reflect if in the second half of this segment
-                        if angle > angle_slice_rad:
-                            angle = (2 * angle_slice_rad) - angle
-                        
-                        # Convert back to source coordinates
-                        xs = cx + radius * math.cos(angle)
-                        ys = cy + radius * math.sin(angle)
-                        
-                        # Clamp and get pixel (simple nearest neighbor for source)
-                        xs_int = max(0, min(w - 1, int(round(xs))))
-                        ys_int = max(0, min(h - 1, int(round(ys))))
-                        
+                        if angle > angle_slice_rad: angle = (2 * angle_slice_rad) - angle
+                        xs = (w/2.0) + radius * math.cos(angle); ys = (h/2.0) + radius * math.sin(angle)
+                        xs_int = max(0, min(w - 1, int(round(xs)))); ys_int = max(0, min(h - 1, int(round(ys))))
                         target_pixels[xt_target, yt_target] = source_pixels[xs_int, ys_int]
                 img_to_sym = output_img
-
-            elif symmetry_type == "Diagonal Mirror (TL-BR Master)":
-                img_to_sym = img_to_sym.transpose(Image.TRANSPOSE)
-            elif symmetry_type == "Diagonal Mirror (TR-BL Master)":
-                img_to_sym = img_to_sym.transpose(Image.TRANSVERSE)
-            
-            # print(f"DEBUG: Symmetry '{symmetry_type}' applied successfully.")
+            elif symmetry_type == "Diagonal Mirror (TL-BR Master)": img_to_sym = img_to_sym.transpose(Image.TRANSPOSE)
+            elif symmetry_type == "Diagonal Mirror (TR-BL Master)": img_to_sym = img_to_sym.transpose(Image.TRANSVERSE)
         except Exception as e: print(f"Symmetry Error ('{symmetry_type}'): {e}"); traceback.print_exc(); return image_in 
         return img_to_sym
 
     def _apply_evolution_pipeline_once(self, image_in, step_num_for_multistep=0):
         current_img = image_in.copy(); output_w, output_h = current_img.size; active_params = {}
         for op_key_cfg, op_config in self.operations_config.items():
-            if "params" in op_config: # Ensure params exist for this op
+            if "params" in op_config:
                 for param_key_cfg, p_config in op_config["params"].items():
                     var_key = p_config["var_key"]; base_val = self.op_params[var_key].get(); final_val = base_val
                     anim_enabled_key = f"{var_key}_anim_enabled"
@@ -516,6 +787,28 @@ class ImageEvolverApp:
                 self.displacement_map_image = None; self.displacement_map_filename_var.set("No map loaded.")
                 traceback.print_exc()
     
+    def load_texture_for_reptile(self): 
+        self._cancel_post_pan_animation()
+        fpath = filedialog.askopenfilename(
+            title="Select Texture Image for Rep-Tile",
+            filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tiff"), ("All files", "*.*")],
+            parent=self.root
+        )
+        if fpath:
+            try:
+                img = Image.open(fpath)
+                if img.mode in ('RGBA', 'LA', 'P'):
+                    img = img.convert('RGB') 
+                self.texture_image_for_reptile = img
+                self.texture_image_filename_var.set(fpath.split('/')[-1])
+                if hasattr(self, 'status_label_reptile'): 
+                    self.status_label_reptile.config(text=f"Texture: {self.texture_image_filename_var.get()}")
+            except Exception as e:
+                messagebox.showerror("Texture Load Error", f"Failed to load texture: {e}", parent=self.root)
+                self.texture_image_for_reptile = None
+                self.texture_image_filename_var.set("No texture loaded.")
+                traceback.print_exc()
+
     def generate_and_load_starter_shape(self): 
         self._cancel_post_pan_animation()
         shape_type = self.starter_shape_type_var.get()
@@ -562,12 +855,19 @@ class ImageEvolverApp:
         else:
             self.schedule_interactive_update()
 
-    def trigger_multistep_evolution(self):
+    def trigger_main_action(self): 
         self._cancel_post_pan_animation()
-        if not self.input_image_loaded: messagebox.showerror("Error", "Load input image first.", parent=self.root); return
+        mode = self.app_mode_var.get()
+        if mode == "Image Evolver":
+            self.trigger_multistep_evolution()
+        elif mode == "Rep-Tile Patterner":
+            self.trigger_reptile_generation()
+
+    def trigger_multistep_evolution(self):
+        if not self.input_image_loaded: messagebox.showerror("Error", "Load input image first for Evolver.", parent=self.root); return
         
         self.stop_evolution_requested = False 
-        self.stop_button.config(state=tk.NORMAL) 
+        self.stop_button_evolver.config(state=tk.NORMAL) 
 
         try:
             num_steps = int(self.entries["steps"].get())
@@ -594,24 +894,16 @@ class ImageEvolverApp:
             for step in range(num_steps):
                 if self.stop_evolution_requested: self.status_label.config(text=f"Evolution stopped at step {step}."); break
                 if zoom_pan_mode == "Process ROI (Pre-Effects)":
-                    # For "Process ROI", the ROI for the *next* step is based on the *output* of the previous step.
-                    # The LFO for pan (if any) would apply to this *current_processing_img* to select the new ROI.
                     roi_content_for_this_step = self._get_image_roi_at_output_resolution(current_processing_img, output_w, output_h, step_num_for_multistep=step + 1)
                     if not roi_content_for_this_step: break
                     current_processing_img = self._apply_evolution_pipeline_once(roi_content_for_this_step, step_num_for_multistep=step + 1)
-                else: # "View Full Image (Post-Effects)"
-                    # Process the full image. Pan LFOs are only used by display_image in this mode.
-                    # So _get_image_roi_at_output_resolution is not needed to prepare input for pipeline here.
-                    # However, _apply_evolution_pipeline_once needs step_num_for_multistep for its own param LFOs.
-                    # The pan LFOs for this mode happen in _get_image_roi_at_output_resolution, which is called
-                    # by display_image if zoom_pan_mode == "View Full Image (Post-Effects)"
+                else: 
                     current_processing_img = self._apply_evolution_pipeline_once(current_processing_img, step_num_for_multistep=step + 1)
 
-
                 if save_frames_enabled: frames_to_save.append(current_processing_img.copy())
-                if (step + 1) % 1 == 0 or step == num_steps - 1: # Update display every step
-                    self.current_evolving_image = current_processing_img.copy() # This is now the full processed image (or processed ROI)
-                    self.display_image(self.current_evolving_image) # Display will handle view if in post-effects mode
+                if (step + 1) % 1 == 0 or step == num_steps - 1:
+                    self.current_evolving_image = current_processing_img.copy()
+                    self.display_image(self.current_evolving_image)
                     self.status_label.config(text=f"Multi-Step Evolution: {step + 1}/{num_steps}")
                     self.root.update_idletasks()
             if not self.stop_evolution_requested: self.status_label.config(text=f"Multi-step evolution complete ({num_steps} steps).")
@@ -619,8 +911,479 @@ class ImageEvolverApp:
         except ValueError as ve: messagebox.showerror("Input Error", f"{ve}", parent=self.root); self.status_label.config(text=f"Input Error: {ve}")
         except Exception as e: messagebox.showerror("Evo Error", f"{e}", parent=self.root); self.status_label.config(text=f"Evo Error: {e}"); traceback.print_exc()
         finally: 
-            self.stop_button.config(state=tk.DISABLED)
+            self.stop_button_evolver.config(state=tk.DISABLED) 
             self.stop_evolution_requested = False
+    
+    def trigger_reptile_generation(self): 
+        self._cancel_post_pan_animation()
+        self.status_label_reptile.config(text="Generating Rep-Tile...")
+        self.root.update_idletasks()
+        
+        texture_source_for_tiles = None 
+        if self.reptile_use_texture_var.get(): 
+            if self.texture_image_for_reptile: 
+                texture_source_for_tiles = self.texture_image_for_reptile
+            elif self.current_evolving_image:
+                texture_source_for_tiles = self.current_evolving_image
+            elif self.input_image_loaded:
+                texture_source_for_tiles = self.input_image_loaded
+        
+        try:
+            width = self.reptile_output_width.get()
+            height = self.reptile_output_height.get()
+            depth = self.reptile_recursion_depth.get() 
+            tile_type = self.reptile_type_var.get()
+            bg_type = self.reptile_background_type_var.get()
+
+
+            if width <= 0 or height <= 0:
+                messagebox.showerror("Input Error", "Output dimensions must be positive.", parent=self.root)
+                self.status_label_reptile.config(text="Error: Invalid dimensions.")
+                return
+            # Depth check is now conditional inside _draw_custom_ifs_recursive
+            # and for L-Tromino/Sphinx it's handled by their respective functions.
+
+            output_image_mode = 'RGB'
+            bg_fill_color = 'black' 
+            if bg_type == "Transparent (PNG only)":
+                output_image_mode = 'RGBA'
+                bg_fill_color = (0,0,0,0) 
+            elif bg_type == "Solid Color (Light Gray)":
+                bg_fill_color = (200, 200, 200)
+            
+            output_image = Image.new(output_image_mode, (width, height), bg_fill_color)
+
+            if bg_type == "Tile with Texture": 
+                bg_texture_to_tile = self.texture_image_for_reptile 
+                if not bg_texture_to_tile: 
+                     bg_texture_to_tile = self.current_evolving_image if self.current_evolving_image else self.input_image_loaded
+
+                if bg_texture_to_tile:
+                    tex_w_bg, tex_h_bg = bg_texture_to_tile.size
+                    if tex_w_bg > 0 and tex_h_bg > 0:
+                        source_bg_pixels = bg_texture_to_tile.load()
+                        output_bg_pixels = output_image.load() 
+                        for i_bg in range(width): 
+                            for j_bg in range(height): 
+                                output_bg_pixels[i_bg,j_bg] = source_bg_pixels[i_bg % tex_w_bg, j_bg % tex_h_bg]
+                    else: 
+                        if hasattr(self, 'status_label_reptile'): self.status_label_reptile.config(text="BG Texture invalid, using dark gray.")
+                        ImageDraw.Draw(output_image).rectangle([0,0,width,height], fill=(100,100,100)) 
+                else: 
+                    if hasattr(self, 'status_label_reptile'): self.status_label_reptile.config(text="BG Texture not found, using dark gray.")
+                    ImageDraw.Draw(output_image).rectangle([0,0,width,height], fill=(100,100,100))
+            
+            if tile_type == "L-Tromino":
+                self._draw_l_tromino_recursive(output_image, texture_source_for_tiles, 0, 0, width, height, depth, 0) 
+            elif tile_type == "Ammann Rhombus":
+                self._draw_ammann_rhombus_recursive(output_image, texture_source_for_tiles, 0, 0, width, height, depth, 0, is_thin=False)
+            elif tile_type == "Ammann Thin Rhombus":
+                self._draw_ammann_thin_rhombus_recursive(output_image, texture_source_for_tiles, 0, 0, width, height, depth, 0) # Call the new method
+            elif tile_type == "Custom IFS Fractal":
+                initial_ifs_transform = (width, 0, 0, 0, height, 0) 
+                self._draw_custom_ifs_recursive(output_image, texture_source_for_tiles, initial_ifs_transform, depth, 0)
+
+
+            self.current_reptile_image = output_image
+            self.display_image(self.current_reptile_image)
+            status_msg = f"{tile_type} generated."
+            if tile_type != "Custom IFS Fractal": 
+                status_msg += f" (Depth: {depth})"
+            else: 
+                status_msg += f" (Iterations: {self.ifs_iterations_var.get()}, Depth: {depth})"
+            self.status_label_reptile.config(text=status_msg)
+
+
+        except Exception as e:
+            messagebox.showerror("Rep-Tile Error", f"Could not generate Rep-Tile: {e}", parent=self.root)
+            self.status_label_reptile.config(text=f"Error: {e}")
+            traceback.print_exc()
+
+    def _draw_single_l_tromino(self, canvas_img, texture_img_full_source, x_bbox, y_bbox, w_bbox, h_bbox, orientation, color_if_no_texture):
+        draw = ImageDraw.Draw(canvas_img)
+        s_w, s_h = math.ceil(w_bbox / 2.0), math.ceil(h_bbox / 2.0)
+        s_w_int = max(1, int(s_w))
+        s_h_int = max(1, int(s_h))
+
+        if w_bbox < 2 or h_bbox < 2: 
+            final_fill_color = color_if_no_texture
+            if texture_img_full_source and self.reptile_use_texture_var.get():
+                try:
+                    patch_w = max(1, int(w_bbox))
+                    patch_h = max(1, int(h_bbox))
+                    
+                    current_texture_to_sample = texture_img_full_source
+                    if self.reptile_texture_effect_var.get() == "Rotate & Tile (per Unit)":
+                         angle = random.choice([0, 90, 180, 270])
+                         if texture_img_full_source: 
+                            current_texture_to_sample = texture_img_full_source.copy().rotate(angle, expand=False, resample=Image.Resampling.BICUBIC)
+
+                    patch = Image.new('RGB', (patch_w, patch_h))
+                    patch_pixels = patch.load()
+                    texture_pixels_loaded = current_texture_to_sample.load() 
+                    tex_w_full, tex_h_full = current_texture_to_sample.size
+
+                    for i in range(patch_w):
+                        for j in range(patch_h):
+                            tex_coord_x = (int(x_bbox) + i) % tex_w_full
+                            tex_coord_y = (int(y_bbox) + j) % tex_h_full
+                            patch_pixels[i,j] = texture_pixels_loaded[tex_coord_x, tex_coord_y]
+                    canvas_img.paste(patch, (int(x_bbox), int(y_bbox)))
+                    return 
+                except Exception: 
+                    final_fill_color = (255,0,255) 
+            draw.rectangle([x_bbox, y_bbox, x_bbox + w_bbox -1, y_bbox + h_bbox -1], fill=final_fill_color)
+            return
+
+        squares_to_render_params = [] 
+        if orientation == 0: 
+            squares_to_render_params = [ (x_bbox, y_bbox, s_w_int, s_h_int), (x_bbox, y_bbox + s_h_int, s_w_int, s_h_int), (x_bbox + s_w_int, y_bbox + s_h_int, s_w_int, s_h_int) ]
+        elif orientation == 1: 
+            squares_to_render_params = [ (x_bbox, y_bbox, s_w_int, s_h_int), (x_bbox + s_w_int, y_bbox, s_w_int, s_h_int), (x_bbox, y_bbox + s_h_int, s_w_int, s_h_int) ]
+        elif orientation == 2: 
+            squares_to_render_params = [ (x_bbox + s_w_int, y_bbox, s_w_int, s_h_int), (x_bbox, y_bbox, s_w_int, s_h_int), (x_bbox + s_w_int, y_bbox + s_h_int, s_w_int, s_h_int) ]
+        elif orientation == 3: 
+            squares_to_render_params = [ (x_bbox + s_w_int, y_bbox, s_w_int, s_h_int), (x_bbox, y_bbox + s_h_int, s_w_int, s_h_int), (x_bbox + s_w_int, y_bbox + s_h_int, s_w_int, s_h_int) ]
+        
+        texture_effect = self.reptile_texture_effect_var.get()
+        use_texture_on_tiles = texture_img_full_source and self.reptile_use_texture_var.get()
+
+        texture_for_this_l_unit = texture_img_full_source 
+        if use_texture_on_tiles and texture_effect == "Rotate & Tile (per Unit)":
+            angle = random.choice([0, 90, 180, 270])
+            if texture_img_full_source: 
+                texture_for_this_l_unit = texture_img_full_source.copy().rotate(angle, expand=False, resample=Image.Resampling.BICUBIC)
+        
+        for sq_x_abs, sq_y_abs, sq_w, sq_h in squares_to_render_params:
+            if sq_w < 1 or sq_h < 1: continue
+
+            if use_texture_on_tiles and texture_for_this_l_unit:
+                texture_to_process_for_square = texture_img_full_source if texture_effect == "Stretch to Unit" else texture_for_this_l_unit
+                
+                if not texture_to_process_for_square or not hasattr(texture_to_process_for_square, 'size') or not all(s > 0 for s in texture_to_process_for_square.size):
+                    draw.rectangle([sq_x_abs, sq_y_abs, sq_x_abs + sq_w -1 , sq_y_abs + sq_h -1 ], fill=(0,0,0)) 
+                    continue
+                
+                tex_w_full, tex_h_full = texture_to_process_for_square.size
+                source_texture_pixels = texture_to_process_for_square.load() 
+                
+                if texture_effect == "Stretch to Unit":
+                    if sq_w > 0 and sq_h > 0:
+                        patch = texture_to_process_for_square.resize((sq_w, sq_h), Image.Resampling.LANCZOS)
+                        canvas_img.paste(patch, (int(sq_x_abs), int(sq_y_abs)))
+                else: 
+                    patch = Image.new('RGB', (sq_w, sq_h)) 
+                    patch_pixels = patch.load()
+                    
+                    for i in range(sq_w): 
+                        for j in range(sq_h): 
+                            global_x_on_canvas = int(sq_x_abs + i)
+                            global_y_on_canvas = int(sq_y_abs + j)
+                            
+                            tex_x = global_x_on_canvas % tex_w_full
+                            tex_y = global_y_on_canvas % tex_h_full
+                            
+                            try:
+                                patch_pixels[i, j] = source_texture_pixels[tex_x, tex_y]
+                            except IndexError: 
+                                patch_pixels[i, j] = (255, 0, 255) 
+                            except Exception: 
+                                patch_pixels[i,j] = (0,255,255) 
+                    canvas_img.paste(patch, (int(sq_x_abs), int(sq_y_abs)))
+            else: 
+                draw.rectangle([sq_x_abs, sq_y_abs, sq_x_abs + sq_w -1 , sq_y_abs + sq_h -1 ], fill=color_if_no_texture)
+
+
+    def _draw_l_tromino_recursive(self, canvas_img, texture_img, x, y, w, h, depth, current_orientation):
+        if depth < 0 or w < 1 or h < 1: return
+        
+        colors = [(255,0,0), (0,255,0), (0,0,255), (255,255,0)] 
+
+        if depth == 0:
+            self._draw_single_l_tromino(canvas_img, texture_img, x, y, w, h, current_orientation, colors[current_orientation % 4])
+            return
+
+        w2, h2 = w / 2.0, h / 2.0
+        if w2 < 1 or h2 < 1: 
+            self._draw_single_l_tromino(canvas_img, texture_img, x, y, w, h, current_orientation, colors[current_orientation % 4])
+            return
+        
+        self._draw_l_tromino_recursive(canvas_img, texture_img, x, y, w2, h2, depth - 1, 1)          
+        self._draw_l_tromino_recursive(canvas_img, texture_img, x + w2, y, w2, h2, depth - 1, 0)      
+        self._draw_l_tromino_recursive(canvas_img, texture_img, x, y + h2, w2, h2, depth - 1, 0)      
+        self._draw_l_tromino_recursive(canvas_img, texture_img, x + w2, y + h2, w2, h2, depth - 1, 3)  
+
+    def _get_ammann_rhombus_unit_polygon(self, side_length=1.0, thin=False):
+        """Defines a unit Ammann rhombus centered at origin.
+        If thin is False, it's the fat rhombus (72/108 deg).
+        If thin is True, it's the thin rhombus (36/144 deg).
+        Pointy ends are along the y-axis.
+        """
+        acute_angle_deg = 36.0 if thin else 72.0
+        alpha_rad_half = (acute_angle_deg / 2.0) * math.pi / 180.0
+        
+        d1_h = side_length * math.cos(alpha_rad_half) 
+        d2_h = side_length * math.sin(alpha_rad_half) 
+
+        if thin: 
+            return [
+                (0, d1_h),      # Top acute vertex
+                (d2_h, 0),      # Right obtuse vertex
+                (0, -d1_h),     # Bottom acute vertex
+                (-d2_h, 0)      # Left obtuse vertex
+            ]
+        else: 
+             return [
+                (0, d1_h),      # Top
+                (d2_h, 0),      # Right
+                (0, -d1_h),     # Bottom
+                (-d2_h, 0)      # Left
+            ]
+
+    def _draw_single_ammann_rhombus_generic(self, canvas_img, texture_img_full_source, x_bbox, y_bbox, w_bbox, h_bbox, color_if_no_texture, is_thin_rhombus):
+        """Draws a single Ammann rhombus (fat or thin), scaled to fit bbox, optionally textured."""
+        
+        unit_poly_pts = self._get_ammann_rhombus_unit_polygon(side_length=1.0, thin=is_thin_rhombus)
+        
+        acute_angle_deg = 36.0 if is_thin_rhombus else 72.0
+        unit_h = 2 * math.cos((acute_angle_deg/2.0) * math.pi / 180.0) 
+        unit_w = 2 * math.sin((acute_angle_deg/2.0) * math.pi / 180.0) 
+
+        if unit_w == 0 or unit_h == 0: return
+
+        scale_x = w_bbox / unit_w
+        scale_y = h_bbox / unit_h
+        scale = min(scale_x, scale_y)
+
+        transformed_poly = []
+        center_x = x_bbox + w_bbox / 2.0
+        center_y = y_bbox + h_bbox / 2.0
+        for p_unit in unit_poly_pts:
+            tx = center_x + p_unit[0] * scale
+            ty = center_y + p_unit[1] * scale 
+            transformed_poly.append((int(round(tx)), int(round(ty))))
+
+        if len(transformed_poly) < 3: return
+
+        current_tile_image = Image.new('RGBA', (int(round(w_bbox)), int(round(h_bbox))), (0,0,0,0))
+        draw_tile = ImageDraw.Draw(current_tile_image)
+        mask_poly = [(p[0] - x_bbox, p[1] - y_bbox) for p in transformed_poly]
+        
+        if self.reptile_use_texture_var.get() and texture_img_full_source:
+            try:
+                base_texture = texture_img_full_source
+                if not isinstance(base_texture, Image.Image):
+                     raise ValueError("Texture source is not a valid PIL Image.")
+                if base_texture.mode != 'RGBA': base_texture = base_texture.convert('RGBA')
+                else: base_texture = base_texture.copy()
+
+                texture_effect = self.reptile_texture_effect_var.get()
+                tex_prepared = None
+                
+                if texture_effect == "Rotate & Tile (per Unit)":
+                    angle = random.choice([0, 90, 180, 270])
+                    tex_rotated = base_texture.rotate(angle, expand=False, resample=Image.Resampling.BICUBIC)
+                    tex_prepared = tex_rotated.resize((int(round(w_bbox)), int(round(h_bbox))), Image.Resampling.LANCZOS)
+                elif texture_effect == "Stretch to Unit":
+                    tex_prepared = base_texture.resize((int(round(w_bbox)), int(round(h_bbox))), Image.Resampling.LANCZOS)
+                else: # "Tile (Global Coords)"
+                    tex_prepared = Image.new('RGBA', (int(round(w_bbox)), int(round(h_bbox))))
+                    tex_w_src, tex_h_src = base_texture.size
+                    src_pixels = base_texture.load()
+                    patch_pixels = tex_prepared.load()
+                    for i_tile in range(int(round(w_bbox))):
+                        for j_tile in range(int(round(h_bbox))):
+                            sample_x = (int(x_bbox) + i_tile) % tex_w_src
+                            sample_y = (int(y_bbox) + j_tile) % tex_h_src
+                            try: patch_pixels[i_tile, j_tile] = src_pixels[sample_x, sample_y]
+                            except IndexError: patch_pixels[i_tile, j_tile] = (0,0,0,255)
+                
+                if tex_prepared.mode != 'RGBA': tex_prepared = tex_prepared.convert('RGBA')
+                
+                rhombus_mask_for_tile = Image.new('L', (int(round(w_bbox)), int(round(h_bbox))), 0)
+                ImageDraw.Draw(rhombus_mask_for_tile).polygon(mask_poly, fill=255, outline=255)
+                current_tile_image.paste(tex_prepared, (0,0), mask=rhombus_mask_for_tile)
+
+            except Exception as e_tex:
+                print(f"Error texturing Ammann rhombus: {e_tex}")
+                traceback.print_exc()
+                draw_tile.polygon(mask_poly, fill=color_if_no_texture + (255,), outline=None)
+        else:
+            draw_tile.polygon(mask_poly, fill=color_if_no_texture + (255,), outline=None)
+        
+        canvas_img.paste(current_tile_image, (int(round(x_bbox)), int(round(y_bbox))), mask=current_tile_image)
+
+    def _draw_ammann_rhombus_recursive(self, canvas_img, texture_img, x, y, w, h, depth, color_idx_offset, is_thin=False):
+        if depth < 0 or w < 1 or h < 1: return
+        colors = [(255,0,0), (0,255,0), (0,0,255), (255,255,0), (128,0,128), (0,128,128)] 
+
+        if depth == 0:
+            self._draw_single_ammann_rhombus_generic(canvas_img, texture_img, x, y, w, h, colors[color_idx_offset % len(colors)], is_thin)
+            return
+
+        w2, h2 = w / 2.0, h / 2.0
+        if w2 < 1 or h2 < 1: 
+            self._draw_single_ammann_rhombus_generic(canvas_img, texture_img, x, y, w, h, colors[color_idx_offset % len(colors)], is_thin)
+            return
+        
+        self._draw_ammann_rhombus_recursive(canvas_img, texture_img, x, y, w2, h2, depth - 1, color_idx_offset + 0, is_thin)          
+        self._draw_ammann_rhombus_recursive(canvas_img, texture_img, x + w2, y, w2, h2, depth - 1, color_idx_offset + 1, is_thin)      
+        self._draw_ammann_rhombus_recursive(canvas_img, texture_img, x, y + h2, w2, h2, depth - 1, color_idx_offset + 2, is_thin)      
+        self._draw_ammann_rhombus_recursive(canvas_img, texture_img, x + w2, y + h2, w2, h2, depth - 1, color_idx_offset + 3, is_thin)  
+
+    def _draw_ammann_thin_rhombus_recursive(self, canvas_img, texture_img, x, y, w, h, depth, color_idx_offset):
+        """ Wrapper to call _draw_ammann_rhombus_recursive with is_thin=True """
+        self._draw_ammann_rhombus_recursive(canvas_img, texture_img, x, y, w, h, depth, color_idx_offset, is_thin=True)
+
+
+    def _draw_custom_ifs_recursive(self, main_canvas_img, texture_source_for_tiles, current_placement_transform, depth, color_offset_idx):
+        if depth < 0:
+            return
+
+        unit_canvas_size = self.ifs_unit_canvas_size_var.get()
+        if unit_canvas_size <= 0: unit_canvas_size = 256
+
+        if depth == 0:
+            ifs_unit_mask = Image.new('L', (unit_canvas_size, unit_canvas_size), 0)
+            draw_mask = ImageDraw.Draw(ifs_unit_mask)
+            
+            num_points_ifs = self.ifs_iterations_var.get()
+            ifs_render_scale = self.ifs_scale_var.get()
+            ifs_render_offset_x = self.ifs_offset_x_var.get()
+            ifs_render_offset_y = self.ifs_offset_y_var.get()
+            
+            x_ifs, y_ifs = 0.0, 0.0
+            burn_in_ifs = 100
+            
+            transforms_for_choice_ifs = []
+            weights_for_choice_ifs = []
+            for i in range(len(self.ifs_transform_vars)):
+                params = self.ifs_transform_vars[i]
+                pillow_tf = (params['a'].get(), params['b'].get(), params['c'].get(),
+                             params['d'].get(), params['e'].get(), params['f'].get())
+                transforms_for_choice_ifs.append({'matrix': pillow_tf, 'color_idx': params['color_idx'].get()})
+                weights_for_choice_ifs.append(params['weight'].get())
+
+            if not transforms_for_choice_ifs or not weights_for_choice_ifs or sum(weights_for_choice_ifs) <= 0:
+                return 
+
+            for i in range(num_points_ifs):
+                try:
+                    chosen_transform_data_ifs = random.choices(transforms_for_choice_ifs, weights=weights_for_choice_ifs, k=1)[0]
+                except ValueError: continue
+                
+                transform_matrix_ifs = chosen_transform_data_ifs['matrix']
+                x_new_ifs, y_new_ifs = transform_point((x_ifs, y_ifs), transform_matrix_ifs)
+                x_ifs, y_ifs = x_new_ifs, y_new_ifs
+
+                if i > burn_in_ifs:
+                    plot_x = int(x_ifs * ifs_render_scale + ifs_render_offset_x)
+                    plot_y = int(unit_canvas_size - (y_ifs * ifs_render_scale + ifs_render_offset_y))
+                    if 0 <= plot_x < unit_canvas_size and 0 <= plot_y < unit_canvas_size:
+                        draw_mask.point((plot_x, plot_y), fill=255)
+            
+            ifs_tile_content = Image.new('RGBA', (unit_canvas_size, unit_canvas_size), (0,0,0,0))
+
+            if self.reptile_use_texture_var.get() and texture_source_for_tiles:
+                try:
+                    base_texture = texture_source_for_tiles
+                    if not isinstance(base_texture, Image.Image): 
+                         raise ValueError("Texture source is not a valid PIL Image.")
+                    if base_texture.mode != 'RGBA': base_texture = base_texture.convert('RGBA')
+                    else: base_texture = base_texture.copy() 
+                    
+                    texture_effect = self.reptile_texture_effect_var.get()
+                    tex_prepared = None
+
+                    if texture_effect == "Rotate & Tile (per Unit)":
+                        angle = random.choice([0, 90, 180, 270])
+                        tex_rotated = base_texture.rotate(angle, expand=False, resample=Image.Resampling.BICUBIC)
+                        tex_prepared = tex_rotated.resize((unit_canvas_size, unit_canvas_size), Image.Resampling.LANCZOS)
+                    elif texture_effect == "Stretch to Unit":
+                        tex_prepared = base_texture.resize((unit_canvas_size, unit_canvas_size), Image.Resampling.LANCZOS)
+                    else: # "Tile (Global Coords)"
+                        tex_prepared = Image.new('RGBA', (unit_canvas_size, unit_canvas_size))
+                        tex_w_src, tex_h_src = base_texture.size
+                        src_pixels = base_texture.load()
+                        patch_pixels = tex_prepared.load()
+                        
+                        final_tile_x_on_canvas, final_tile_y_on_canvas = transform_point((0,0), current_placement_transform)
+                        
+                        for i_tile in range(unit_canvas_size):
+                            for j_tile in range(unit_canvas_size):
+                                sample_x = (int(final_tile_x_on_canvas) + i_tile) % tex_w_src
+                                sample_y = (int(final_tile_y_on_canvas) + j_tile) % tex_h_src
+                                try:
+                                    patch_pixels[i_tile, j_tile] = src_pixels[sample_x, sample_y]
+                                except IndexError: 
+                                    patch_pixels[i_tile, j_tile] = (0,0,0,255)
+
+
+                    if tex_prepared.mode != 'RGBA': tex_prepared = tex_prepared.convert('RGBA')
+                    ifs_tile_content.paste(tex_prepared, (0,0), mask=ifs_unit_mask)
+                except Exception as e_tex_unit:
+                    print(f"Error texturing IFS unit: {e_tex_unit} - {type(e_tex_unit)}")
+                    traceback.print_exc()
+                    if hasattr(self, 'status_label_reptile'): self.status_label_reptile.config(text="IFS Texturing Error. Check console.")
+                    ImageDraw.Draw(ifs_tile_content).bitmap((0,0), ifs_unit_mask, fill=(255,0,255,255))
+
+            else: # No texture
+                point_color_str = self.ifs_point_color_var.get().lower()
+                final_color = self.ifs_color_palette[color_offset_idx % len(self.ifs_color_palette)]
+                if point_color_str != "palette":
+                    try: final_color = ImageColor.getrgb(point_color_str)
+                    except ValueError: pass 
+                if len(final_color) == 3: final_color += (255,)
+                ImageDraw.Draw(ifs_tile_content).bitmap((0,0), ifs_unit_mask, fill=final_color)
+
+            tile_rotation = self.ifs_tile_rotation_var.get()
+            if tile_rotation != 0:
+                ifs_tile_content = ifs_tile_content.rotate(tile_rotation, resample=Image.Resampling.BICUBIC, expand=False)
+
+            unit_square_for_placement = [(0,0), (1,0), (1,1), (0,1)] 
+            target_quad_on_canvas_corners = transform_polygon(unit_square_for_placement, current_placement_transform)
+            
+            min_xt_global = min(p[0] for p in target_quad_on_canvas_corners)
+            max_xt_global = max(p[0] for p in target_quad_on_canvas_corners)
+            min_yt_global = min(p[1] for p in target_quad_on_canvas_corners)
+            max_yt_global = max(p[1] for p in target_quad_on_canvas_corners)
+            
+            final_display_width = int(round(max_xt_global - min_xt_global))
+            final_display_height = int(round(max_yt_global - min_yt_global))
+
+            if final_display_width > 0 and final_display_height > 0:
+                try:
+                    pasted_tile = ifs_tile_content.resize((final_display_width, final_display_height), Image.Resampling.LANCZOS)
+                    
+                    if main_canvas_img.mode == 'RGB' and pasted_tile.mode == 'RGBA':
+                        bg_slice = main_canvas_img.crop((int(min_xt_global), int(min_yt_global), 
+                                                         int(round(min_xt_global)) + final_display_width, 
+                                                         int(round(min_yt_global)) + final_display_height))
+                        if bg_slice.mode != 'RGB': bg_slice = bg_slice.convert('RGB')
+                        
+                        temp_composite_tile = bg_slice.copy()
+                        temp_composite_tile.paste(pasted_tile,(0,0), mask=pasted_tile.getchannel('A'))
+                        main_canvas_img.paste(temp_composite_tile, (int(min_xt_global), int(min_yt_global)))
+                    else:
+                        main_canvas_img.paste(pasted_tile, (int(min_xt_global), int(min_yt_global)), mask=pasted_tile.getchannel('A') if pasted_tile.mode=='RGBA' else None)
+
+                except Exception as e_paste:
+                    print(f"Error pasting transformed IFS tile: {e_paste}")
+                    traceback.print_exc()
+            return 
+
+        # Recursive Step
+        meta_s = 0.5 
+        meta_transforms = [
+            (meta_s, 0, 0,      0, meta_s, 0     ),
+            (meta_s, 0, meta_s, 0, meta_s, 0     ),
+            (meta_s, 0, 0,      0, meta_s, meta_s),
+            (meta_s, 0, meta_s, 0, meta_s, meta_s)
+        ]
+
+        for i, meta_tf_local in enumerate(meta_transforms):
+            new_placement_transform = compose_affine(current_placement_transform, meta_tf_local) 
+            self._draw_custom_ifs_recursive(main_canvas_img, texture_source_for_tiles, new_placement_transform, depth - 1, color_offset_idx + i)
 
 
     def request_stop_evolution(self): 
@@ -653,34 +1416,13 @@ class ImageEvolverApp:
         try:
             image_for_thumbnail = pil_img_to_display
             zoom_pan_mode = self.zoom_pan_timing_var.get()
+            app_mode = self.app_mode_var.get()
 
-            if zoom_pan_mode == "View Full Image (Post-Effects)":
-                # In this mode, pil_img_to_display is the full processed image.
-                # We need to apply zoom/pan to it for display only.
-                
-                # We need to get the ROI from image_for_thumbnail using current zoom/pan settings
-                # The _get_image_roi_at_output_resolution already resizes to output_w/h.
-                # For display, we want to crop then thumbnail to display label size.
-                
+            if app_mode == "Image Evolver" and zoom_pan_mode == "View Full Image (Post-Effects)":
                 src_w, src_h = image_for_thumbnail.size
                 zoom = max(0.01, min(self.zoom_factor.get(), 100.0))
-                # Use current view center (which might be LFO panned if multi-step just ran and display_image is called from there)
-                view_center_x_display_norm = self.view_center_x_norm.get()
-                view_center_y_display_norm = self.view_center_y_norm.get()
-
-                # If LFO pan is active for multi-step, _get_image_roi_at_output_resolution
-                # will return an LFO-panned ROI. For display, we want the *current manual* view.
-                # So, _get_image_roi_at_output_resolution needs to know not to apply LFO if it's just for display.
-                # The step_num_for_multistep=0 in its call from _perform_interactive_update already does this.
-                # For display from multi-step, we use the direct image.
-                
-                # Simpler: just use the _get_image_roi_at_output_resolution with the display target dims
-                # This will crop and resize.
-                # This might be inefficient if target_display_width/height are large.
-                # Alternative: Crop first, then thumbnail the crop.
-
-                center_x_abs = view_center_x_display_norm * src_w
-                center_y_abs = view_center_y_display_norm * src_h
+                center_x_abs = self.view_center_x_norm.get() * src_w
+                center_y_abs = self.view_center_y_norm.get() * src_h
                 view_w_on_src = src_w / zoom; view_h_on_src = src_h / zoom
                 x0 = center_x_abs - view_w_on_src / 2; y0 = center_y_abs - view_h_on_src / 2
                 x1 = x0 + view_w_on_src; y1 = y0 + view_h_on_src
@@ -688,53 +1430,128 @@ class ImageEvolverApp:
                             min(src_w, int(round(x1))), min(src_h, int(round(y1))))
                 if crop_box[2] > crop_box[0] and crop_box[3] > crop_box[1]:
                     image_for_thumbnail = image_for_thumbnail.crop(crop_box)
-                # else, image_for_thumbnail remains the full image if crop is invalid
             
             mdw = self.target_display_width if self.target_display_width > 0 else 300
             mdh = self.target_display_height if self.target_display_height > 0 else 300
-            
-            img_copy = image_for_thumbnail.copy() # image_for_thumbnail is now the correct view
-            img_copy.thumbnail((mdw, mdh), Image.Resampling.LANCZOS) # Just thumbnail to fit display
-            
-            self.photo_image = ImageTk.PhotoImage(img_copy)
-            self.image_display_label.config(image=self.photo_image)
-        except Exception as e: self.status_label.config(text=f"Display Error: {e}"); traceback.print_exc()
+            img_copy = image_for_thumbnail.copy(); img_copy.thumbnail((mdw, mdh), Image.Resampling.LANCZOS)
+            self.photo_image = ImageTk.PhotoImage(img_copy); self.image_display_label.config(image=self.photo_image)
+        except Exception as e: 
+            current_status_label = self.status_label if self.app_mode_var.get() == "Image Evolver" else self.status_label_reptile
+            current_status_label.config(text=f"Display Error: {e}"); 
+            traceback.print_exc()
 
     def save_image_as(self):
-        if not self.current_evolving_image: messagebox.showwarning("No Image", "Evolve an image first.", parent=self.root); return
+        image_to_save = None
+        status_label_to_use = self.status_label 
+        default_fn = "output.png"
+
+        if self.app_mode_var.get() == "Image Evolver":
+            image_to_save = self.current_evolving_image
+            default_fn = self.entries.get("default_filename", tk.StringVar(value="evolved_art.png")).get()
+        elif self.app_mode_var.get() == "Rep-Tile Patterner":
+            image_to_save = self.current_reptile_image
+            default_fn = "reptile_pattern.png" 
+            status_label_to_use = self.status_label_reptile
+
+
+        if not image_to_save: messagebox.showwarning("No Image", "Generate an image first.", parent=self.root); return
+        
         try:
-            sugg_fname = self.entries["default_filename"].get(); base_s, orig_e = os.path.splitext(sugg_fname)
+            base_s, orig_e = os.path.splitext(default_fn)
             if not orig_e: orig_e = ".png"
             rand_s = f"{random.randint(0,9999):04d}"; init_file = f"{base_s}_{rand_s}{orig_e}"
             fpath = filedialog.asksaveasfilename(initialfile=init_file, defaultextension=orig_e, filetypes=[("PNG","*.png"),("JPEG","*.jpg"),("BMP","*.bmp"),("All","*.*")], parent=self.root)
-            if fpath: self.current_evolving_image.save(fpath); self.status_label.config(text=f"Saved: {fpath}"); messagebox.showinfo("Success", f"Saved to:\n{fpath}", parent=self.root)
-            else: self.status_label.config(text="Save cancelled.")
-        except Exception as e: messagebox.showerror("Save Error", f"{e}", parent=self.root); self.status_label.config(text=f"Save Error: {e}"); traceback.print_exc()
+            if fpath: 
+                image_to_save.save(fpath); 
+                status_label_to_use.config(text=f"Saved: {fpath}"); 
+                messagebox.showinfo("Success", f"Saved to:\n{fpath}", parent=self.root)
+            else: status_label_to_use.config(text="Save cancelled.")
+        except Exception as e: messagebox.showerror("Save Error", f"{e}", parent=self.root); status_label_to_use.config(text=f"Save Error: {e}"); traceback.print_exc()
 
-    def reset_image_to_original(self):
+    def save_reptile_image(self):
+        """Saves the current rep-tile image."""
+        if not self.current_reptile_image:
+            messagebox.showwarning("No Image", "Generate a Rep-Tile image first.", parent=self.root)
+            return
+        
+        default_fn = f"{self.reptile_type_var.get().lower().replace(' ', '_')}_pattern.png"
+        try:
+            base_s, orig_e = os.path.splitext(default_fn)
+            if not orig_e: orig_e = ".png"
+            rand_s = f"{random.randint(0,9999):04d}"
+            init_file = f"{base_s}_{rand_s}{orig_e}"
+            
+            fpath = filedialog.asksaveasfilename(
+                initialfile=init_file, 
+                defaultextension=orig_e,
+                filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg"), ("BMP", "*.bmp"), ("All files", "*.*")],
+                parent=self.root
+            )
+            if fpath:
+                self.current_reptile_image.save(fpath)
+                self.status_label_reptile.config(text=f"Saved: {fpath}")
+                messagebox.showinfo("Success", f"Rep-Tile image saved to:\n{fpath}", parent=self.root)
+            else:
+                self.status_label_reptile.config(text="Save cancelled.")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Could not save Rep-Tile image: {e}", parent=self.root)
+            self.status_label_reptile.config(text=f"Save Error: {e}")
+            traceback.print_exc()
+
+    def send_reptile_to_evolver(self):
+        """Sends the current rep-tile image to the Image Evolver mode."""
+        if not self.current_reptile_image:
+            messagebox.showwarning("No Image", "Generate a Rep-Tile image first to send.", parent=self.root)
+            return
+
+        try:
+            self.input_image_loaded = self.current_reptile_image.copy()
+            self.input_image_filename_var.set(f"From Rep-Tiler ({self.reptile_type_var.get()})")
+            self.current_evolving_image = None # Clear any previous evolution
+            
+            self.app_mode_var.set("Image Evolver")
+            self.on_app_mode_change() # This will switch tabs and update display
+            self.reset_view() # Reset zoom/pan for the new image in evolver
+            
+            if hasattr(self, 'status_label'):
+                 self.status_label.config(text=f"Image from Rep-Tiler loaded. Output W/H set to {self.input_image_loaded.width}x{self.input_image_loaded.height}.")
+            if hasattr(self, 'entries'): # Update evolver's output size to match
+                self.entries["output_width"].set(str(self.input_image_loaded.width))
+                self.entries["output_height"].set(str(self.input_image_loaded.height))
+
+        except Exception as e:
+            messagebox.showerror("Send Error", f"Could not send image to Evolver: {e}", parent=self.root)
+            traceback.print_exc()
+
+
+    def reset_image_to_original(self): 
         self._cancel_post_pan_animation()
-        if not self.input_image_loaded: messagebox.showwarning("No Image", "No image loaded.", parent=self.root); return
-        try:self.current_evolving_image=None;self.reset_view();self.status_label.config(text="Image & view reset.")
-        except Exception as e:messagebox.showerror("Reset Error",f"{e}",parent=self.root);self.status_label.config(text=f"Reset Error:{e}");traceback.print_exc()
+        if self.app_mode_var.get() == "Image Evolver":
+            if not self.input_image_loaded: messagebox.showwarning("No Image", "No image loaded for Evolver.", parent=self.root); return
+            try:self.current_evolving_image=None;self.reset_view();self.status_label.config(text="Image & view reset.")
+            except Exception as e:messagebox.showerror("Reset Error",f"{e}",parent=self.root);self.status_label.config(text=f"Reset Error:{e}");traceback.print_exc()
+        elif self.app_mode_var.get() == "Rep-Tile Patterner":
+            self.current_reptile_image = None
+            self.display_image(None) 
+            self.status_label_reptile.config(text="Rep-Tile canvas cleared.")
+
 
     def on_hold_evolve_press(self,event):
+        if self.app_mode_var.get() != "Image Evolver": return
         self._cancel_post_pan_animation()
         if not self.input_image_loaded:messagebox.showerror("Error","Load image first.",parent=self.root);return
         self.hold_evolve_active=True;self.status_label.config(text="Continuously evolving...");self.continuous_evolve_step()
     def on_hold_evolve_release(self,event):
         self.hold_evolve_active=False
         if self.hold_evolve_after_id:self.root.after_cancel(self.hold_evolve_after_id);self.hold_evolve_after_id=None
-        if self.status_label.cget("text").startswith("Continuously"):self.status_label.config(text="Continuous evolution stopped.")
+        if hasattr(self, 'status_label') and self.status_label.cget("text").startswith("Continuously"):self.status_label.config(text="Continuous evolution stopped.")
     def continuous_evolve_step(self):
         if not self.hold_evolve_active or not self.input_image_loaded:self.hold_evolve_active=False;return
-        
         source_for_pipeline = self.current_evolving_image if self.current_evolving_image else self.input_image_loaded
         if not source_for_pipeline: self.hold_evolve_active=False;return
-
         try:
             ow=int(self.entries["output_width"].get());oh=int(self.entries["output_height"].get())
             if ow<=0 or oh<=0:self.hold_evolve_active=False;return
-
             image_to_process = None
             zoom_pan_mode = self.zoom_pan_timing_var.get()
             if zoom_pan_mode == "Process ROI (Pre-Effects)":
@@ -742,64 +1559,41 @@ class ImageEvolverApp:
             else: 
                 if source_for_pipeline.size != (ow, oh): image_to_process = source_for_pipeline.copy().resize((ow,oh), Image.Resampling.LANCZOS)
                 else: image_to_process = source_for_pipeline.copy()
-            
             if not image_to_process:self.hold_evolve_active=False;return
-            
-            evolved_step=self._apply_evolution_pipeline_once(image_to_process,step_num_for_multistep=0) # LFOs not used for hold-to-evolve for simplicity
+            evolved_step=self._apply_evolution_pipeline_once(image_to_process,step_num_for_multistep=0) 
             self.current_evolving_image=evolved_step;self.display_image(self.current_evolving_image)
             if self.hold_evolve_active:self.hold_evolve_after_id=self.root.after(self.hold_evolve_delay,self.continuous_evolve_step)
         except Exception as e:self.status_label.config(text=f"Cont.Evo Err:{e}");self.hold_evolve_active=False;traceback.print_exc()
 
     def _start_post_pan_animation(self, last_pan_dx, last_pan_dy, input_is_pixel_delta=True):
-        if not self.post_pan_anim_enabled_var.get() or not self.input_image_loaded: 
-            # print("DEBUG: Post-pan start condition not met.")
-            return
+        if not self.post_pan_anim_enabled_var.get() or not self.input_image_loaded: return
         self._cancel_post_pan_animation() 
-        
         if input_is_pixel_delta: 
-            # If mouse dragged right (positive last_pan_dx), image content moved left.
-            # So, view center effectively moved left relative to content.
-            # Drift should make view center continue moving left (negative factor).
-            self.post_pan_anim_dx_factor_dir = -1 if last_pan_dx > 0.5 else (1 if last_pan_dx < -0.5 else 0) 
-            self.post_pan_anim_dy_factor_dir = -1 if last_pan_dy > 0.5 else (1 if last_pan_dy < -0.5 else 0)
+            self.post_pan_anim_dx_factor_dir = -1 if last_pan_dx > 1 else (1 if last_pan_dx < -1 else 0) 
+            self.post_pan_anim_dy_factor_dir = -1 if last_pan_dy > 1 else (1 if last_pan_dy < -1 else 0)
         else: 
             self.post_pan_anim_dx_factor_dir = last_pan_dx
             self.post_pan_anim_dy_factor_dir = last_pan_dy
-        
-        # print(f"DEBUG: _start_post_pan_animation. Factors dir: dx={self.post_pan_anim_dx_factor_dir}, dy={self.post_pan_anim_dy_factor_dir}")
-
-        if self.post_pan_anim_dx_factor_dir == 0 and self.post_pan_anim_dy_factor_dir == 0:
-            # print("DEBUG: No drift direction, not starting animation.")
-            return
-
+        if self.post_pan_anim_dx_factor_dir == 0 and self.post_pan_anim_dy_factor_dir == 0: return
         self.is_post_pan_anim_running = True
         self.post_pan_anim_current_step = 0
-        self.status_label.config(text="Post-pan drift...")
-        # print("DEBUG: Kicking off _run_post_pan_animation_step")
+        if hasattr(self, 'status_label'): self.status_label.config(text="Post-pan drift...")
         self._run_post_pan_animation_step()
 
     def _run_post_pan_animation_step(self):
-        # print(f"DEBUG: _run_post_pan_animation_step called. Running: {self.is_post_pan_anim_running}, Step: {self.post_pan_anim_current_step}")
-        if not self.is_post_pan_anim_running or not self.input_image_loaded:
-            self.is_post_pan_anim_running = False; return
-        
+        if not self.is_post_pan_anim_running or not self.input_image_loaded: self.is_post_pan_anim_running = False; return
         max_steps = self.post_pan_drift_steps_var.get()
         if self.post_pan_anim_current_step >= max_steps:
-            self.is_post_pan_anim_running = False; self.status_label.config(text="Post-pan drift finished."); 
+            self.is_post_pan_anim_running = False; 
+            if hasattr(self, 'status_label'): self.status_label.config(text="Post-pan drift finished."); 
             return
-
         drift_step_size_norm = self.post_pan_drift_amount_var.get()
         effective_pan_x_norm = self.post_pan_anim_dx_factor_dir * drift_step_size_norm
         effective_pan_y_norm = self.post_pan_anim_dy_factor_dir * drift_step_size_norm
-        
-        # print(f"DEBUG: Post-pan step {self.post_pan_anim_current_step + 1}/{max_steps}, effective_pan_norm: dx={effective_pan_x_norm:.5f}, dy={effective_pan_y_norm:.5f}")
-        
-        if abs(effective_pan_x_norm) > 1e-6 or abs(effective_pan_y_norm) > 1e-6 : # Only update if there's actual drift
-            current_cx = self.view_center_x_norm.get(); current_cy = self.view_center_y_norm.get()
-            new_center_x = current_cx + effective_pan_x_norm; new_center_y = current_cy + effective_pan_y_norm
-            self.view_center_x_norm.set(max(0.0, min(1.0, new_center_x))); self.view_center_y_norm.set(max(0.0, min(1.0, new_center_y)))
-            self.schedule_interactive_update() 
-        
+        current_cx = self.view_center_x_norm.get(); current_cy = self.view_center_y_norm.get()
+        new_center_x = current_cx + effective_pan_x_norm; new_center_y = current_cy + effective_pan_y_norm
+        self.view_center_x_norm.set(max(0.0, min(1.0, new_center_x))); self.view_center_y_norm.set(max(0.0, min(1.0, new_center_y)))
+        self.schedule_interactive_update() 
         self.post_pan_anim_current_step += 1
         delay_ms = self.post_pan_drift_delay_var.get()
         if delay_ms < 10: delay_ms = 10 
@@ -807,10 +1601,7 @@ class ImageEvolverApp:
 
     def _cancel_post_pan_animation(self):
         if self.post_pan_after_id: self.root.after_cancel(self.post_pan_after_id); self.post_pan_after_id = None
-        if self.is_post_pan_anim_running: # Only change status if it was running
-            self.status_label.config(text="Drift cancelled.")
         self.is_post_pan_anim_running = False
-
 
 # 4. SCRIPT EXECUTION
 if __name__ == "__main__":
